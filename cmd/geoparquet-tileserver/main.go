@@ -661,6 +661,15 @@ func main() {
 	}
 }
 
+func contentRangeTotal(v string) (int64, bool) {
+	i := strings.LastIndex(v, "/")
+	if i < 0 || i+1 >= len(v) {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(v[i+1:], 10, 64)
+	return n, err == nil && n > 0
+}
+
 // proxyAsset streams a local or remote STAC asset. Remote range headers are
 // forwarded so Parquet consumers can keep using HTTP range reads.
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, contentType string) {
@@ -669,17 +678,32 @@ func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, conten
 		if method == "" {
 			method = http.MethodGet
 		}
+		headRequest := method == http.MethodHead
+		// Some CDNs (notably the Overture PMTiles bucket) reject HEAD and
+		// open-ended ranges. A one-byte GET gives us the total length for a
+		// standards-compliant HEAD response.
 		req, err := http.NewRequestWithContext(r.Context(), method, href, nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		req.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
-		for _, h := range []string{"Range", "If-None-Match", "If-Modified-Since"} {
-			if v := r.Header.Get(h); v != "" {
-				req.Header.Set(h, v)
+		if headRequest {
+			req.Method = http.MethodGet
+			req.Header.Set("Range", "bytes=0-0")
+		} else {
+			for _, h := range []string{"Range", "If-None-Match", "If-Modified-Since"} {
+				if v := r.Header.Get(h); v != "" {
+					req.Header.Set(h, v)
+				}
+			}
+			// Overture's PMTiles CDN rejects full GETs. Tools such as
+			// terrio/0.4 fetch the PMTiles header with a plain GET, so serve
+			// a bounded prefix when there is no Range header.
+			if req.Header.Get("Range") == "" && strings.HasSuffix(strings.Split(href, "?")[0], ".pmtiles") {
+				req.Header.Set("Range", "bytes=0-16777215")
 			}
 		}
+		req.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -695,10 +719,17 @@ func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, conten
 			w.Header().Set("Content-Type", contentType)
 		}
 		w.Header().Set("Cache-Control", "public, max-age=3600")
-		w.WriteHeader(resp.StatusCode)
-		if r.Method != http.MethodHead {
-			_, _ = io.Copy(w, resp.Body)
+		if headRequest {
+			if total, ok := contentRangeTotal(resp.Header.Get("Content-Range")); ok {
+				w.Header().Set("Content-Length", strconv.FormatInt(total, 10))
+			} else if n := resp.ContentLength; n > 0 {
+				w.Header().Set("Content-Length", strconv.FormatInt(n, 10))
+			}
+			w.WriteHeader(http.StatusOK)
+			return
 		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
 		return
 	}
 	f, err := os.Open(href)
