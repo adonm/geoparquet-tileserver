@@ -82,6 +82,7 @@ type Group struct {
 	ID          string
 	Title       string
 	Description string
+	Base        string
 	Collections []*Collection
 	once        sync.Once
 	items       []Item
@@ -92,6 +93,7 @@ type node struct {
 	id           string
 	title        string
 	description  string
+	base         string
 	isCollection bool
 	collection   *Collection
 	children     []*node
@@ -171,7 +173,7 @@ func Load(path string) (*Catalog, error) {
 			return &node{id: col.ID, title: col.Title, isCollection: true, collection: col}, nil
 		}
 
-		n := &node{id: head.ID, title: head.Title, description: head.Description}
+		n := &node{id: head.ID, title: head.Title, description: head.Description, base: p}
 		if n.title == "" {
 			n.title = n.id
 		}
@@ -233,6 +235,7 @@ func Load(path string) (*Catalog, error) {
 					ID:          n.id,
 					Title:       firstNonEmpty(n.title, n.id),
 					Description: n.description,
+					Base:        n.base,
 					Collections: direct,
 				})
 			}

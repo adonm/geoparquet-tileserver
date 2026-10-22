@@ -378,8 +378,13 @@ func (s *server) collection(_ context.Context, in *struct {
 	}
 	if entry.collection != nil {
 		detail.Items = base + "/collections/" + url.PathEscape(entry.name) + "/items" + q
-		detail.STAC = base + "/collections/" + url.PathEscape(entry.name) + "/stac" + q
 		detail.Assets = assets
+	}
+	if entry.collection != nil && entry.collection.Base != "" {
+		detail.STAC = base + "/collections/" + url.PathEscape(entry.name) + "/stac" + q
+	}
+	if entry.group != nil && entry.group.Base != "" {
+		detail.STAC = base + "/collections/" + url.PathEscape(entry.name) + "/stac" + q
 	}
 	return &CollectionOutput{Body: detail}, nil
 }
@@ -417,6 +422,20 @@ func (s *server) items(_ context.Context, in *struct {
 		out.Body = append(out.Body, info)
 	}
 	return out, nil
+}
+
+func cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, If-None-Match, If-Modified-Since, Range")
+		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func htmlRedirect(next http.Handler) http.Handler {
@@ -555,6 +574,7 @@ func main() {
 	s.cache, _ = lru.New[string, []byte](cfg.CacheTiles)
 
 	router := chi.NewMux()
+	router.Use(cors)
 	router.Use(htmlRedirect)
 	router.Get("/", s.indexHTML)
 	router.Get("/stac", s.catalogSTAC)
@@ -699,11 +719,21 @@ func (s *server) catalogSTAC(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) collectionSTAC(w http.ResponseWriter, r *http.Request) {
 	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
-	if err != nil || entry.collection == nil {
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	s.serveAsset(w, r, entry.collection.Base, "application/json")
+	href := ""
+	if entry.collection != nil {
+		href = entry.collection.Base
+	} else if entry.group != nil {
+		href = entry.group.Base
+	}
+	if href == "" {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, href, "application/json")
 }
 
 func (s *server) collectionAsset(w http.ResponseWriter, r *http.Request) {

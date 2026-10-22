@@ -36,6 +36,7 @@ type htmlCollection struct {
 	TileURL     string
 	ItemsURL    string
 	STACURL     string
+	RustGISURL  string
 	Assets      []htmlAsset
 	Children    []htmlLink
 }
@@ -54,6 +55,7 @@ type collectionsPage struct {
 	CatalogURL  string
 	Catalogs    []htmlCatalog
 	Collections []htmlCollection
+	RustGISURL  string
 }
 
 type itemView struct {
@@ -78,144 +80,183 @@ type collectionPage struct {
 }
 
 var collectionsTemplate = template.Must(template.New("collections").Parse(`<!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<style>
-:root { color-scheme: light dark; --muted:#68707c; --line:#d7dbe2; --accent:#0b6bcb; }
-body { font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; padding: 2rem; max-width: 1100px; }
-h1 { margin: 0 0 .25rem; font-size: 1.7rem; }
-p.lede { color: var(--muted); margin: 0 0 1.25rem; }
-a { color: var(--accent); }
-nav { display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 1.5rem; }
-nav a { border: 1px solid var(--line); border-radius: 999px; padding: .25rem .7rem; text-decoration: none; }
-nav a.current { background: var(--accent); border-color: var(--accent); color: white; }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; vertical-align: top; padding: .55rem .5rem; border-bottom: 1px solid var(--line); }
-th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-td.id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
-.kind { font-size: .75rem; border: 1px solid var(--line); border-radius: 4px; padding: .05rem .35rem; color: var(--muted); }
-.muted { color: var(--muted); }
-.links { display: flex; flex-wrap: wrap; gap: .45rem; }
-.links a { text-decoration: none; }
-code { font-size: .9em; }
-</style>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+<style>code { word-break: break-word; } .table td { vertical-align: middle; }</style>
 </head>
-<body>
-<h1>GeoParquet Tile Server</h1>
-<p class="lede">Browse STAC collections, virtual groups, and raw GeoParquet assets.</p>
-<nav>
-{{range .Catalogs}}<a href="{{.URL}}"{{if .Current}} class="current"{{end}}>{{.Name}}{{if .Title}} · {{.Title}}{{end}}</a>{{end}}
-<a href="/stac{{.CatalogURL}}">Raw STAC</a>
-<a href="/docs">API docs</a>
+<body class="bg-body-tertiary">
+<nav class="navbar navbar-expand-lg bg-body border-bottom">
+  <div class="container">
+    <a class="navbar-brand fw-semibold" href="/">GeoParquet Tile Server</a>
+    <div class="d-flex flex-wrap gap-2 align-items-center">
+      <a class="btn btn-sm btn-outline-secondary" href="/docs">API docs</a>
+      {{if .RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.RustGISURL}}" target="_blank" rel="noopener">Open catalog in RustGIS</a>{{end}}
+    </div>
+  </div>
 </nav>
-<h2>Collections &amp; groups <span class="muted">({{len .Collections}})</span></h2>
-<table>
-<thead><tr><th>ID</th><th>Title</th><th>Kind</th><th>Bounds</th><th>Zooms</th><th>Links</th></tr></thead>
-<tbody>
-{{range .Collections}}
-<tr>
-<td class="id"><a href="{{.PageURL}}">{{.ID}}</a></td>
-<td>{{.Title}}{{if .Description}}<div class="muted">{{.Description}}</div>{{end}}</td>
-<td><span class="kind">{{.Kind}}</span></td>
-<td class="muted"><code>{{.Bounds}}</code></td>
-<td>{{.MinZoom}}–{{.MaxZoom}}</td>
-<td><div class="links">
-<a href="{{.TileJSONURL}}">TileJSON</a>
-{{if .ItemsURL}}<a href="{{.ItemsURL}}">Items / assets</a>{{end}}
-{{if .STACURL}}<a href="{{.STACURL}}">STAC</a>{{end}}
-</div></td>
-</tr>
-{{end}}
-</tbody>
-</table>
-<p class="muted">Tile URL template: <code>/collections/{collection}/tiles/{z}/{x}/{y}.mvt</code>
-{{if .CatalogURL}} · catalog query: <code>{{.CatalogURL}}</code>{{end}}</p>
+<main class="container py-4">
+  <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+    <div>
+      <h1 class="h3 mb-1">Browse catalog</h1>
+      <p class="text-secondary mb-0">Collections, virtual groups, tiles, STAC documents, and raw assets.</p>
+    </div>
+    <div class="btn-group btn-group-sm" role="group" aria-label="Catalog">
+      {{range .Catalogs}}<a class="btn {{if .Current}}btn-dark{{else}}btn-outline-dark{{end}}" href="{{.URL}}">{{.Name}}{{if .Title}} · {{.Title}}{{end}}</a>{{end}}
+    </div>
+  </div>
+  <div class="card shadow-sm">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <span class="fw-semibold">Collections &amp; groups</span>
+      <span class="badge text-bg-secondary">{{len .Collections}}</span>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-hover align-middle mb-0">
+        <thead class="table-light"><tr><th>ID</th><th>Title</th><th>Kind</th><th>Bounds</th><th>Zooms</th><th>Links</th></tr></thead>
+        <tbody>
+        {{range .Collections}}
+          <tr>
+            <td><a class="fw-semibold text-decoration-none" href="{{.PageURL}}"><code>{{.ID}}</code></a></td>
+            <td>{{.Title}}{{if .Description}}<div class="small text-secondary">{{.Description}}</div>{{end}}</td>
+            <td><span class="badge {{if eq .Kind "group"}}text-bg-warning{{else}}text-bg-info{{end}}">{{.Kind}}</span></td>
+            <td class="small text-secondary"><code>{{.Bounds}}</code></td>
+            <td class="small">{{.MinZoom}}–{{.MaxZoom}}</td>
+            <td>
+              <div class="d-flex flex-wrap gap-2 small">
+                <a href="{{.PageURL}}">Browse</a>
+                <a href="{{.TileJSONURL}}">TileJSON</a>
+                {{if .ItemsURL}}<a href="{{.ItemsURL}}">Items / assets</a>{{end}}
+                {{if .STACURL}}<a href="{{.STACURL}}">STAC</a>{{end}}
+                {{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">RustGIS ↗</a>{{end}}
+              </div>
+            </td>
+          </tr>
+        {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <p class="small text-secondary mt-3 mb-0">Tile URL template: <code>/collections/{collection}/tiles/{z}/{x}/{y}.mvt</code></p>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
 </body>
 </html>
 `))
 
 var collectionTemplate = template.Must(template.New("collection").Parse(`<!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<style>
-:root { color-scheme: light dark; --muted:#68707c; --line:#d7dbe2; --accent:#0b6bcb; }
-body { font: 15px/1.5 system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; padding: 2rem; max-width: 1000px; }
-h1 { margin: 0 0 .2rem; font-size: 1.7rem; }
-h2 { margin-top: 1.8rem; }
-a { color: var(--accent); }
-.muted { color: var(--muted); }
-nav { display: flex; flex-wrap: wrap; gap: .6rem; margin: 1rem 0 1.5rem; }
-.box { border: 1px solid var(--line); border-radius: 8px; padding: 1rem; margin: 1rem 0; }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: .45rem .4rem; border-bottom: 1px solid var(--line); }
-th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-code { font-size: .9em; }
-.kind { font-size: .75rem; border: 1px solid var(--line); border-radius: 4px; padding: .05rem .35rem; color: var(--muted); }
-</style>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+<style>code { word-break: break-word; }</style>
 </head>
-<body>
-<nav><a href="/">← Directory</a><a href="/collections.html{{.CatalogURL}}">Collections</a><a href="/docs">API docs</a></nav>
-<h1>{{.Collection.Title}} <span class="kind">{{.Collection.Kind}}</span></h1>
-<p class="muted"><code>{{.Collection.ID}}</code>{{if .Collection.Description}} · {{.Collection.Description}}{{end}}</p>
-<div class="box">
-<div><strong>Bounds</strong> <code>{{.Collection.Bounds}}</code></div>
-<div><strong>Zoom</strong> {{.Collection.MinZoom}}–{{.Collection.MaxZoom}}</div>
-<div class="links" style="margin-top:.7rem">
-<a href="{{.Collection.TileJSONURL}}">TileJSON</a>
-{{if .Collection.ItemsURL}}<a href="{{.Collection.ItemsURL}}">Items / raw assets</a>{{end}}
-{{if .Collection.STACURL}}<a href="{{.Collection.STACURL}}">Raw STAC</a>{{end}}
-</div>
-</div>
-<p><strong>Tile URL</strong><br><code>{{.Collection.TileURL}}</code></p>
-{{if .Collection.Assets}}
-<h2>Collection assets</h2>
-<table><thead><tr><th>Name</th><th>Type</th><th>Passthrough</th></tr></thead><tbody>
-{{range .Collection.Assets}}<tr><td><code>{{.Name}}</code></td><td>{{.Type}}</td><td><a href="{{.URL}}">open</a></td></tr>{{end}}
-</tbody></table>
-{{end}}
-{{if .Collection.Children}}
-<h2>Sub-collections</h2>
-<ul>{{range .Collection.Children}}<li><a href="{{.URL}}">{{.Title}}</a> <span class="muted"><code>{{.Name}}</code></span></li>{{end}}</ul>
-{{end}}
+<body class="bg-body-tertiary">
+<nav class="navbar navbar-expand-lg bg-body border-bottom">
+  <div class="container">
+    <a class="navbar-brand fw-semibold" href="/">GeoParquet Tile Server</a>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sm btn-outline-secondary" href="/collections.html{{.CatalogURL}}">Collections</a>
+      <a class="btn btn-sm btn-outline-secondary" href="/docs">API docs</a>
+    </div>
+  </div>
+</nav>
+<main class="container py-4">
+  <nav aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">Directory</a></li><li class="breadcrumb-item active" aria-current="page">{{.Collection.ID}}</li></ol></nav>
+  <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+    <div>
+      <h1 class="h3 mb-1">{{.Collection.Title}} <span class="badge {{if eq .Collection.Kind "group"}}text-bg-warning{{else}}text-bg-info{{end}}">{{.Collection.Kind}}</span></h1>
+      <div class="text-secondary"><code>{{.Collection.ID}}</code>{{if .Collection.Description}} · {{.Collection.Description}}{{end}}</div>
+    </div>
+    <div class="d-flex flex-wrap gap-2">
+      <a class="btn btn-sm btn-outline-primary" href="{{.Collection.TileJSONURL}}">TileJSON</a>
+      {{if .Collection.ItemsURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.ItemsURL}}">Items / raw assets</a>{{end}}
+      {{if .Collection.STACURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.STACURL}}">Raw STAC</a>{{end}}
+      {{if .Collection.RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.Collection.RustGISURL}}" target="_blank" rel="noopener">Open in RustGIS ↗</a>{{end}}
+    </div>
+  </div>
+  <div class="row g-3">
+    <div class="col-lg-7">
+      <div class="card shadow-sm h-100">
+        <div class="card-body">
+          <h2 class="h6 text-uppercase text-secondary">Tile URL</h2>
+          <code>{{.Collection.TileURL}}</code>
+          <hr>
+          <dl class="row mb-0 small">
+            <dt class="col-sm-3">Bounds</dt><dd class="col-sm-9"><code>{{.Collection.Bounds}}</code></dd>
+            <dt class="col-sm-3">Zooms</dt><dd class="col-sm-9">{{.Collection.MinZoom}}–{{.Collection.MaxZoom}}</dd>
+          </dl>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-5">
+      <div class="card shadow-sm h-100">
+        <div class="card-body">
+          <h2 class="h6 text-uppercase text-secondary">STAC / passthrough</h2>
+          <p class="small text-secondary">Raw documents and assets are streamed by this server. Remote assets support HTTP range requests.</p>
+          <div class="d-grid gap-2">
+            {{if .Collection.STACURL}}<a class="btn btn-sm btn-outline-secondary text-start" href="{{.Collection.STACURL}}">Raw STAC document</a>{{end}}
+            {{if .Collection.ItemsURL}}<a class="btn btn-sm btn-outline-secondary text-start" href="{{.Collection.ItemsURL}}">Item and asset directory</a>{{end}}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  {{if .Collection.Assets}}
+  <h2 class="h5 mt-4">Collection assets</h2>
+  <div class="card shadow-sm"><div class="table-responsive"><table class="table table-sm mb-0">
+    <thead class="table-light"><tr><th>Name</th><th>Type</th><th>Passthrough</th></tr></thead>
+    <tbody>{{range .Collection.Assets}}<tr><td><code>{{.Name}}</code></td><td class="text-secondary">{{.Type}}</td><td><a href="{{.URL}}">open</a></td></tr>{{end}}</tbody>
+  </table></div></div>
+  {{end}}
+  {{if .Collection.Children}}
+  <h2 class="h5 mt-4">Sub-collections</h2>
+  <div class="list-group shadow-sm">
+    {{range .Collection.Children}}<a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" href="{{.URL}}"><span>{{.Title}} <span class="text-secondary"><code>{{.Name}}</code></span></span><span>→</span></a>{{end}}
+  </div>
+  {{end}}
+</main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
 </body>
 </html>
 `))
 
 var itemsTemplate = template.Must(template.New("items").Parse(`<!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<style>
-:root { color-scheme: light dark; --muted:#68707c; --line:#d7dbe2; --accent:#0b6bcb; }
-body { font: 15px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; padding: 2rem; max-width: 1100px; }
-a { color: var(--accent); }
-h1 { margin: 0 0 1rem; font-size: 1.6rem; }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; vertical-align: top; padding: .5rem .4rem; border-bottom: 1px solid var(--line); }
-th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
-.muted { color: var(--muted); }
-code { font-size: .9em; }
-</style>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+<style>code { word-break: break-word; }</style>
 </head>
-<body>
-<nav><a href="/">← Directory</a><a href="/collections/{{.Collection}}.html{{.Catalog}}">Collection</a></nav>
-<h1>{{.Title}}</h1>
-<table><thead><tr><th>Item</th><th>BBox</th><th>STAC</th><th>Raw assets</th></tr></thead><tbody>
-{{range .Items}}<tr>
-<td><code>{{.ID}}</code></td>
-<td class="muted"><code>{{.BBox}}</code></td>
-<td><a href="{{.STAC}}">STAC</a></td>
-<td>{{range .Assets}}<a href="{{.URL}}">{{.Name}}</a> {{end}}</td>
-</tr>{{end}}
-</tbody></table>
+<body class="bg-body-tertiary">
+<nav class="navbar navbar-expand-lg bg-body border-bottom">
+  <div class="container">
+    <a class="navbar-brand fw-semibold" href="/">GeoParquet Tile Server</a>
+    <div class="d-flex gap-2">
+      <a class="btn btn-sm btn-outline-secondary" href="/collections/{{.Collection}}.html{{.Catalog}}">Collection</a>
+      <a class="btn btn-sm btn-outline-secondary" href="/docs">API docs</a>
+    </div>
+  </div>
+</nav>
+<main class="container py-4">
+  <h1 class="h3 mb-3">{{.Title}}</h1>
+  <div class="card shadow-sm"><div class="table-responsive"><table class="table table-hover align-middle mb-0">
+    <thead class="table-light"><tr><th>Item</th><th>BBox</th><th>STAC</th><th>Raw assets</th></tr></thead>
+    <tbody>{{range .Items}}<tr>
+      <td><code>{{.ID}}</code></td>
+      <td class="small text-secondary"><code>{{.BBox}}</code></td>
+      <td><a href="{{.STAC}}">STAC</a></td>
+      <td class="small">{{range .Assets}}<a class="me-2" href="{{.URL}}">{{.Name}}</a>{{end}}</td>
+    </tr>{{end}}</tbody>
+  </table></div></div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
 </body>
 </html>
 `))
@@ -231,6 +272,13 @@ func (s *server) catalogQuery(name string) string {
 		return ""
 	}
 	return "?catalog=" + url.QueryEscape(name)
+}
+
+func rustgisURL(stac string) string {
+	if stac == "" {
+		return ""
+	}
+	return "https://web.rustgis.app/?stac=" + url.QueryEscape(stac)
 }
 
 func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) htmlCollection {
@@ -261,6 +309,12 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 				URL: base + "/collections/" + id + "/assets/" + url.PathEscape(name) + q,
 			})
 		}
+	}
+	if e.group != nil && e.group.Base != "" {
+		hc.STACURL = base + "/collections/" + id + "/stac" + q
+	}
+	if hc.STACURL != "" {
+		hc.RustGISURL = rustgisURL(hc.STACURL)
 	}
 	if e.group != nil {
 		for _, child := range e.group.Collections {
@@ -305,6 +359,9 @@ func (s *server) collectionsHTML(w http.ResponseWriter, r *http.Request) {
 	catalogs, q := s.htmlCatalogList(selected)
 	page := collectionsPage{
 		Title: "Collections · GeoParquet Tile Server", Catalog: selected, CatalogURL: q, Catalogs: catalogs,
+	}
+	if base := strings.TrimRight(s.cfg.BaseURL, "/"); base != "" {
+		page.RustGISURL = rustgisURL(base + "/stac" + q)
 	}
 	for _, name := range st.order {
 		page.Collections = append(page.Collections, s.htmlCollection(st, st.layers[name], selected))

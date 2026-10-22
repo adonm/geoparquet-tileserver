@@ -23,8 +23,10 @@ It is deliberately narrower than a general tile platform such as Tegola:
 - virtual groups stitch sibling collections (for example Overture themes)
   into one filterable MVT layer
 - direct passthrough for STAC documents and all discovered assets
-- browseable HTML directory with links to collections, groups, items, tiles,
-  TileJSON, raw STAC, and passthrough files
+- browseable Bootstrap HTML directory with links to collections, groups,
+  items, tiles, TileJSON, raw STAC, and passthrough files
+- "Open in RustGIS" links for catalogs, collections, and virtual groups
+- CORS headers for browser-based clients such as RustGIS
 - STAC and Parquet assets over local paths, `file://`, and HTTP(S)
 - HTTP range requests with a chunked read cache
 - lazy item loading and lazy Parquet dataset opening
@@ -82,6 +84,28 @@ Browsers requesting `/collections`, `/collections/{collection}`, or
 `/collections/{collection}/items` with `Accept: text/html` are redirected to
 the corresponding `.html` page. JSON clients keep getting JSON from the same
 paths.
+
+The UI uses Bootstrap 5.3.8 from jsDelivr. Bootstrap 6 has not been released;
+5.3.8 is the current stable release.
+
+### RustGIS links
+
+Catalog, collection, and group pages include an **Open in RustGIS** button.
+It uses the RustGIS web-app link format:
+
+```text
+https://web.rustgis.app/?stac=<url-encoded-catalog-or-collection-json>
+```
+
+For example:
+
+```text
+https://web.rustgis.app/?stac=https%3A%2F%2Fexample.org%2Fcollections%2Fdivisions%2Fstac
+```
+
+RustGIS opens static catalogs and collections, including their raw assets.
+The server sends CORS headers so the browser-based app can fetch the catalog,
+items, and range requests.
 
 ## Passthrough routes
 
@@ -253,6 +277,22 @@ raw filter query.
 
 `gpio publish stac` can generate the catalog. `gpio process overview` or
 `tylertoo overview` can generate optimized overview GeoParquet.
+
+## Container build with ko
+
+```bash
+# Install ko: https://ko.build
+KO_DOCKER_REPO=ko.local ko build --local --base-import-paths --tags latest \
+  ./cmd/geoparquet-tileserver
+
+docker run -d --name geoparquet-tileserver \
+  -p 127.0.0.1:8080:8080 \
+  -v "$PWD/config.yaml:/config.yaml:ro" \
+  ko.local/geoparquet-tileserver:latest --config /config.yaml --listen :8080
+```
+
+The image is a small static/distroless image. Put a TLS reverse proxy such as
+Caddy in front of the container for HTTPS.
 
 ## Performance notes
 
