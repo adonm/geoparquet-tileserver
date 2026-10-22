@@ -25,22 +25,24 @@ type htmlLink struct {
 }
 
 type htmlCollection struct {
-	ID          string
-	Title       string
-	Description string
-	Kind        string
-	Bounds      string
-	MinZoom     int
-	MaxZoom     int
-	PageURL     string
-	TileJSONURL string
-	TileURL     string
-	ItemsURL    string
-	STACURL     string
-	PMTilesURL  string
-	RustGISURL  string
-	Assets      []htmlAsset
-	Children    []htmlLink
+	ID                string
+	Title             string
+	Description       string
+	Kind              string
+	Bounds            string
+	MinZoom           int
+	MaxZoom           int
+	PageURL           string
+	TileJSONURL       string
+	TileURL           string
+	ItemsURL          string
+	STACURL           string
+	PMTilesURL        string
+	ParquetURL        string
+	RustGISURL        string
+	RustGISParquetURL string
+	Assets            []htmlAsset
+	Children          []htmlLink
 }
 
 type htmlCatalog struct {
@@ -132,6 +134,7 @@ var collectionsTemplate = template.Must(template.New("collections").Parse(`<!doc
                 {{if .ItemsURL}}<a href="{{.ItemsURL}}">Items / assets</a>{{end}}
                 {{if .STACURL}}<a href="{{.STACURL}}">STAC</a>{{end}}
                 {{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">Tiles in RustGIS ↗</a>{{end}}
+                {{if .RustGISParquetURL}}<a href="{{.RustGISParquetURL}}" target="_blank" rel="noopener">Parquet in RustGIS ↗</a>{{end}}
               </div>
             </td>
           </tr>
@@ -178,6 +181,7 @@ var collectionTemplate = template.Must(template.New("collection").Parse(`<!docty
       {{if .Collection.PMTilesURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.PMTilesURL}}">PMTiles passthrough</a>{{end}}
       {{if .Collection.ItemsURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.ItemsURL}}">Items / raw assets</a>{{end}}
       {{if .Collection.STACURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.STACURL}}">Raw STAC</a>{{end}}
+      {{if .Collection.RustGISParquetURL}}<a class="btn btn-sm btn-success" href="{{.Collection.RustGISParquetURL}}" target="_blank" rel="noopener">Open Parquet in RustGIS ↗</a>{{end}}
       {{if .Collection.RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.Collection.RustGISURL}}" target="_blank" rel="noopener">Open tiles in RustGIS ↗</a>{{end}}
     </div>
   </div>
@@ -358,6 +362,25 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 				ha.RustGISURL = rustgisDataURL(assetURL)
 			}
 			hc.Assets = append(hc.Assets, ha)
+		}
+		var fallback string
+		for _, a := range hc.Assets {
+			if !strings.HasSuffix(strings.ToLower(a.URL), ".parquet") {
+				continue
+			}
+			if !strings.Contains(strings.ToLower(a.Name), "hex") {
+				hc.ParquetURL = a.URL
+				break
+			}
+			if fallback == "" {
+				fallback = a.URL
+			}
+		}
+		if hc.ParquetURL == "" {
+			hc.ParquetURL = fallback
+		}
+		if hc.ParquetURL != "" {
+			hc.RustGISParquetURL = rustgisDataURL(hc.ParquetURL)
 		}
 	}
 	if e.group != nil && e.group.Base != "" {
