@@ -4,12 +4,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,6 +22,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/paulmach/orb"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/adonm/geoparquet-tileserver/internal/catalog"
@@ -25,8 +31,61 @@ import (
 	"github.com/adonm/geoparquet-tileserver/internal/tiles"
 )
 
+type layerEntry struct {
+	name       string
+	title      string
+	kind       string
+	collection *catalog.Collection
+	group      *catalog.Group
+	opts       tiles.Options
+
+	once  sync.Once
+	layer *tiles.Layer
+	err   error
+}
+
+func (e *layerEntry) get() (*tiles.Layer, error) {
+	e.once.Do(func() {
+		var items []catalog.Item
+		var err error
+		switch {
+		case e.collection != nil:
+			items, err = e.collection.Items()
+		case e.group != nil:
+			items, err = e.group.Items()
+		default:
+			err = fmt.Errorf("layer %q has no collection or group", e.name)
+		}
+		if err != nil {
+			e.err = err
+			return
+		}
+		e.layer, e.err = tiles.New(e.opts, items)
+	})
+	return e.layer, e.err
+}
+
+func (e *layerEntry) bounds() orb.Bound {
+	if e.layer != nil {
+		return e.layer.Bounds
+	}
+	if e.collection != nil {
+		return e.collection.Bound()
+	}
+	if e.group != nil {
+		return e.group.Bound()
+	}
+	return orb.Bound{Min: orb.Point{-180, -85}, Max: orb.Point{180, 85}}
+}
+
+func (e *layerEntry) minZoom() int { return e.opts.MinZoom }
+func (e *layerEntry) maxZoom() int { return e.opts.MaxZoom }
+
 type catalogState struct {
-	layers map[string]*tiles.Layer
+	cat    *catalog.Catalog
+	base   string
+	layers map[string]*layerEntry
+	order  []string
 }
 
 type server struct {
@@ -44,11 +103,27 @@ func (s *server) state(name string) *catalogState {
 	if st, ok := s.states[name]; ok {
 		return st
 	}
-	// Also accept the configured catalog URL itself as the query value.
 	if alias, ok := s.catalogURL[name]; ok {
 		return s.states[alias]
 	}
 	return nil
+}
+
+func (s *server) catalogNames() []string {
+	names := make([]string, 0, len(s.states))
+	for name := range s.states {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if names[i] == "default" {
+			return true
+		}
+		if names[j] == "default" {
+			return false
+		}
+		return names[i] < names[j]
+	})
+	return names
 }
 
 type TileInput struct {
@@ -90,15 +165,48 @@ type VectorLayer struct {
 }
 
 type CollectionInfo struct {
-	ID      string    `json:"id"`
-	Name    string    `json:"name"`
-	MinZoom int       `json:"minzoom"`
-	MaxZoom int       `json:"maxzoom"`
-	Bounds  []float64 `json:"bounds"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Title       string    `json:"title,omitempty"`
+	Description string    `json:"description,omitempty"`
+	Kind        string    `json:"kind"`
+	MinZoom     int       `json:"minzoom"`
+	MaxZoom     int       `json:"maxzoom"`
+	Bounds      []float64 `json:"bounds"`
 }
 
 type CollectionsOutput struct {
 	Body []CollectionInfo
+}
+
+type CollectionDetail struct {
+	ID          string            `json:"id"`
+	Title       string            `json:"title,omitempty"`
+	Description string            `json:"description,omitempty"`
+	Kind        string            `json:"kind"`
+	MinZoom     int               `json:"minzoom"`
+	MaxZoom     int               `json:"maxzoom"`
+	Bounds      []float64         `json:"bounds"`
+	TileJSON    string            `json:"tilejson"`
+	Tiles       string            `json:"tiles"`
+	Items       string            `json:"items"`
+	STAC        string            `json:"stac"`
+	Assets      map[string]string `json:"assets,omitempty"`
+}
+
+type CollectionOutput struct {
+	Body CollectionDetail
+}
+
+type ItemInfo struct {
+	ID     string            `json:"id"`
+	BBox   []float64         `json:"bbox,omitempty"`
+	STAC   string            `json:"stac"`
+	Assets map[string]string `json:"assets,omitempty"`
+}
+
+type ItemsOutput struct {
+	Body []ItemInfo
 }
 
 type HealthOutput struct {
@@ -107,16 +215,27 @@ type HealthOutput struct {
 	}
 }
 
-func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
-	st := s.state(in.Catalog)
+func (s *server) entry(catalogName, collection string) (*catalogState, *layerEntry, error) {
+	st := s.state(catalogName)
 	if st == nil {
-		return nil, huma.Error404NotFound("unknown catalog: " + in.Catalog)
+		return nil, nil, fmt.Errorf("unknown catalog: %s", catalogName)
 	}
-	layer, ok := st.layers[in.Collection]
+	entry, ok := st.layers[collection]
 	if !ok {
-		return nil, huma.Error404NotFound("unknown collection: " + in.Collection)
+		return st, nil, fmt.Errorf("unknown collection: %s", collection)
 	}
-	if int(in.Z) < layer.MinZoom || int(in.Z) > layer.MaxZoom {
+	return st, entry, nil
+}
+
+func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
+	_, entry, err := s.entry(in.Catalog, in.Collection)
+	if err != nil {
+		if strings.HasPrefix(err.Error(), "unknown catalog") {
+			return nil, huma.Error404NotFound(err.Error())
+		}
+		return nil, huma.Error404NotFound(err.Error())
+	}
+	if int(in.Z) < entry.minZoom() || int(in.Z) > entry.maxZoom() {
 		return nil, huma.Error404NotFound("zoom out of range")
 	}
 	ys := strings.TrimSuffix(in.Y, ".mvt")
@@ -134,7 +253,6 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 		if in.FilterLang != "" && in.FilterLang != "cql2-text" && in.FilterLang != "cql2-json" {
 			return nil, huma.Error400BadRequest("unsupported filter-lang: " + in.FilterLang)
 		}
-		var err error
 		flt, err = filt.Compile(in.Filter)
 		if err != nil {
 			return nil, huma.Error400BadRequest("invalid filter: " + err.Error())
@@ -149,6 +267,10 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 		}, nil
 	}
 	v, err, _ := s.group.Do(key, func() (any, error) {
+		layer, err := entry.get()
+		if err != nil {
+			return nil, err
+		}
 		return layer.Render(ctx, in.Z, in.X, uint32(y), minPtr, flt)
 	})
 	if err != nil {
@@ -169,29 +291,28 @@ func (s *server) tileJSON(ctx context.Context, in *struct {
 	Proto      string `header:"X-Forwarded-Proto"`
 	Catalog    string `query:"catalog" doc:"Named catalog alias from config"`
 }) (*TileJSONOutput, error) {
-	st := s.state(in.Catalog)
-	if st == nil {
-		return nil, huma.Error404NotFound("unknown catalog: " + in.Catalog)
+	_, entry, err := s.entry(in.Catalog, in.Collection)
+	if err != nil {
+		return nil, huma.Error404NotFound(err.Error())
 	}
-	layer, ok := st.layers[in.Collection]
-	if !ok {
-		return nil, huma.Error404NotFound("unknown collection: " + in.Collection)
-	}
-	base := strings.TrimRight(s.cfg.BaseURL, "/")
-	tileURL := "/collections/" + layer.Name + "/tiles/{z}/{x}/{y}.mvt"
-	if base != "" {
+	b := entry.bounds()
+	tileURL := "/collections/" + url.PathEscape(entry.name) + "/tiles/{z}/{x}/{y}.mvt"
+	if base := strings.TrimRight(s.cfg.BaseURL, "/"); base != "" {
 		tileURL = base + tileURL
+	}
+	if in.Catalog != "" {
+		tileURL += "?catalog=" + url.QueryEscape(in.Catalog)
 	}
 	return &TileJSONOutput{Body: &TileJSON{
 		TileJSON: "3.0.0",
-		Name:     layer.Name,
+		Name:     entry.name,
 		Tiles:    []string{tileURL},
-		MinZoom:  layer.MinZoom,
-		MaxZoom:  layer.MaxZoom,
-		Bounds:   []float64{layer.Bounds.Min.X(), layer.Bounds.Min.Y(), layer.Bounds.Max.X(), layer.Bounds.Max.Y()},
+		MinZoom:  entry.minZoom(),
+		MaxZoom:  entry.maxZoom(),
+		Bounds:   []float64{b.Min.X(), b.Min.Y(), b.Max.X(), b.Max.Y()},
 		VectorLayers: []VectorLayer{{
-			ID:     layer.Name,
-			Fields: map[string]string{"count": "Number", "sum_value": "Number"},
+			ID:     entry.name,
+			Fields: map[string]string{},
 		}},
 	}}, nil
 }
@@ -204,13 +325,128 @@ func (s *server) collections(_ context.Context, in *struct {
 		return nil, huma.Error404NotFound("unknown catalog: " + in.Catalog)
 	}
 	out := &CollectionsOutput{}
-	for _, l := range st.layers {
+	for _, name := range st.order {
+		e := st.layers[name]
+		b := e.bounds()
+		kind := e.kind
 		out.Body = append(out.Body, CollectionInfo{
-			ID: l.Name, Name: l.Name, MinZoom: l.MinZoom, MaxZoom: l.MaxZoom,
-			Bounds: []float64{l.Bounds.Min.X(), l.Bounds.Min.Y(), l.Bounds.Max.X(), l.Bounds.Max.Y()},
+			ID: e.name, Name: e.name, Title: e.title, Description: e.description(),
+			Kind: kind, MinZoom: e.minZoom(), MaxZoom: e.maxZoom(),
+			Bounds: []float64{b.Min.X(), b.Min.Y(), b.Max.X(), b.Max.Y()},
 		})
 	}
 	return out, nil
+}
+
+func (e *layerEntry) description() string {
+	if e.collection != nil {
+		return e.collection.Description
+	}
+	if e.group != nil {
+		return e.group.Description
+	}
+	return ""
+}
+
+func (s *server) collection(_ context.Context, in *struct {
+	Collection string `path:"collection"`
+	Catalog    string `query:"catalog"`
+}) (*CollectionOutput, error) {
+	_, entry, err := s.entry(in.Catalog, in.Collection)
+	if err != nil {
+		return nil, huma.Error404NotFound(err.Error())
+	}
+	b := entry.bounds()
+	base := strings.TrimRight(s.cfg.BaseURL, "/")
+	q := ""
+	if in.Catalog != "" {
+		q = "?catalog=" + url.QueryEscape(in.Catalog)
+	}
+	tileURL := base + "/collections/" + url.PathEscape(entry.name) + "/tiles/{z}/{x}/{y}.mvt" + q
+	assets := map[string]string{}
+	if entry.collection != nil {
+		for name := range entry.collection.Assets {
+			assets[name] = base + "/collections/" + url.PathEscape(entry.name) + "/assets/" + url.PathEscape(name) + q
+		}
+	}
+	detail := CollectionDetail{
+		ID: entry.name, Title: entry.title, Description: entry.description(), Kind: entry.kind,
+		MinZoom: entry.minZoom(), MaxZoom: entry.maxZoom(),
+		Bounds:   []float64{b.Min.X(), b.Min.Y(), b.Max.X(), b.Max.Y()},
+		TileJSON: base + "/collections/" + url.PathEscape(entry.name) + "/tilejson.json" + q,
+		Tiles:    tileURL,
+	}
+	if entry.collection != nil {
+		detail.Items = base + "/collections/" + url.PathEscape(entry.name) + "/items" + q
+		detail.STAC = base + "/collections/" + url.PathEscape(entry.name) + "/stac" + q
+		detail.Assets = assets
+	}
+	return &CollectionOutput{Body: detail}, nil
+}
+
+func (s *server) items(_ context.Context, in *struct {
+	Collection string `path:"collection"`
+	Catalog    string `query:"catalog"`
+}) (*ItemsOutput, error) {
+	_, entry, err := s.entry(in.Catalog, in.Collection)
+	if err != nil {
+		return nil, huma.Error404NotFound(err.Error())
+	}
+	if entry.collection == nil {
+		return nil, huma.Error400BadRequest("item listing is only available for STAC collections, not groups")
+	}
+	items, err := entry.collection.Items()
+	if err != nil {
+		return nil, huma.Error500InternalServerError(err.Error())
+	}
+	q := ""
+	if in.Catalog != "" {
+		q = "?catalog=" + url.QueryEscape(in.Catalog)
+	}
+	base := strings.TrimRight(s.cfg.BaseURL, "/")
+	out := &ItemsOutput{}
+	for _, it := range items {
+		info := ItemInfo{ID: it.ID, BBox: it.BBox}
+		info.STAC = base + "/collections/" + url.PathEscape(entry.name) + "/items/" + url.PathEscape(it.ID) + q
+		if len(it.Assets) > 0 {
+			info.Assets = map[string]string{}
+			for name := range it.Assets {
+				info.Assets[name] = base + "/collections/" + url.PathEscape(entry.name) + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + q
+			}
+		}
+		out.Body = append(out.Body, info)
+	}
+	return out, nil
+}
+
+func htmlRedirect(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || !strings.Contains(r.Header.Get("Accept"), "text/html") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		p := r.URL.Path
+		target := ""
+		switch {
+		case p == "/collections":
+			target = "/collections.html"
+		case strings.HasPrefix(p, "/collections/") && strings.HasSuffix(p, "/items"):
+			target = strings.TrimSuffix(p, "/items") + "/items.html"
+		case strings.HasPrefix(p, "/collections/") && !strings.HasSuffix(p, ".html"):
+			rest := strings.TrimPrefix(p, "/collections/")
+			if rest != "" && !strings.Contains(rest, "/") {
+				target = "/collections/" + rest + ".html"
+			}
+		}
+		if target == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.URL.RawQuery != "" {
+			target += "?" + r.URL.RawQuery
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
+	})
 }
 
 func main() {
@@ -233,25 +469,76 @@ func main() {
 	if catalogOverride != "" {
 		cfg.Catalog = catalogOverride
 	}
+
 	s := &server{cfg: cfg, states: map[string]*catalogState{}, catalogURL: map[string]string{}}
 	build := func(name, catalogURL string) error {
 		cat, err := catalog.Load(catalogURL)
 		if err != nil {
 			return err
 		}
-		layers := map[string]*tiles.Layer{}
-		for _, lc := range cfg.Layers {
-			items := cat.Filter(lc.Collection)
-			l, err := tiles.New(tiles.Options{
-				Name: lc.Name, Collection: lc.Collection, GeometryColumn: lc.GeometryColumn,
-				MinZoom: lc.MinZoom, MaxZoom: lc.MaxZoom, Preload: cfg.Preload,
-			}, items)
-			if err != nil {
-				return err
+		st := &catalogState{cat: cat, base: catalogURL, layers: map[string]*layerEntry{}}
+		if len(cfg.Layers) > 0 {
+			for _, lc := range cfg.Layers {
+				col := cat.Collection(lc.Collection)
+				grp := cat.Group(lc.Collection)
+				if lc.Collection == "" {
+					// Empty collection means "all items in this catalog".
+					if len(cat.Collections) == 1 {
+						col = cat.Collections[0]
+					} else {
+						grp = &catalog.Group{ID: lc.Name, Title: lc.Name, Collections: cat.Collections}
+					}
+				}
+				if col == nil && grp == nil {
+					return fmt.Errorf("layer %q: collection or group %q not found", lc.Name, lc.Collection)
+				}
+				e := &layerEntry{
+					name: lc.Name, kind: "collection", collection: col,
+					opts: tiles.Options{Name: lc.Name, Collection: lc.Collection, GeometryColumn: lc.GeometryColumn, MinZoom: lc.MinZoom, MaxZoom: lc.MaxZoom, Preload: cfg.Preload},
+				}
+				if col != nil {
+					e.title = col.Title
+				} else {
+					e.kind = "group"
+					e.group = grp
+					e.title = grp.Title
+				}
+				st.layers[lc.Name] = e
+				st.order = append(st.order, lc.Name)
 			}
-			layers[lc.Name] = l
+		} else {
+			for _, col := range cat.Collections {
+				if _, exists := st.layers[col.ID]; exists {
+					continue
+				}
+				st.layers[col.ID] = &layerEntry{
+					name: col.ID, title: col.Title, kind: "collection", collection: col,
+					opts: tiles.Options{Name: col.ID, Collection: col.ID, MinZoom: 0, MaxZoom: 14, Preload: cfg.Preload},
+				}
+				st.order = append(st.order, col.ID)
+			}
+			for _, group := range cat.Groups {
+				if _, exists := st.layers[group.ID]; exists {
+					continue
+				}
+				st.layers[group.ID] = &layerEntry{
+					name: group.ID, title: group.Title, kind: "group", group: group,
+					opts: tiles.Options{Name: group.ID, MinZoom: 0, MaxZoom: 14, Preload: false},
+				}
+				st.order = append(st.order, group.ID)
+			}
 		}
-		s.states[name] = &catalogState{layers: layers}
+		if len(st.layers) == 0 {
+			return fmt.Errorf("catalog %q has no usable collections", catalogURL)
+		}
+		if cfg.Preload {
+			for _, e := range st.layers {
+				if _, err := e.get(); err != nil {
+					return fmt.Errorf("preload %q: %w", e.name, err)
+				}
+			}
+		}
+		s.states[name] = st
 		s.catalogURL[catalogURL] = name
 		return nil
 	}
@@ -259,17 +546,34 @@ func main() {
 		slog.Error("catalog", "url", cfg.Catalog, "err", err)
 		os.Exit(1)
 	}
-	for name, url := range cfg.Catalogs {
-		if err := build(name, url); err != nil {
-			slog.Error("catalog alias", "name", name, "url", url, "err", err)
+	for name, catalogURL := range cfg.Catalogs {
+		if err := build(name, catalogURL); err != nil {
+			slog.Error("catalog alias", "name", name, "url", catalogURL, "err", err)
 			os.Exit(1)
 		}
 	}
 	s.cache, _ = lru.New[string, []byte](cfg.CacheTiles)
 
 	router := chi.NewMux()
+	router.Use(htmlRedirect)
+	router.Get("/", s.indexHTML)
+	router.Get("/stac", s.catalogSTAC)
+	router.Get("/index.html", s.indexHTML)
+	router.Get("/collections.html", s.collectionsHTML)
+	router.Get("/collections/{collection}.html", s.collectionHTML)
+	router.Get("/collections/{collection}/items.html", s.itemsHTML)
+	router.Get("/collections/{collection}/stac", s.collectionSTAC)
+	router.Get("/collections/{collection}/assets/{asset}", s.collectionAsset)
+	router.Get("/collections/{collection}/items/{item}", s.itemSTAC)
+	router.Get("/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
+	router.Head("/stac", s.catalogSTAC)
+	router.Head("/collections/{collection}/stac", s.collectionSTAC)
+	router.Head("/collections/{collection}/assets/{asset}", s.collectionAsset)
+	router.Head("/collections/{collection}/items/{item}", s.itemSTAC)
+	router.Head("/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
+
 	humaCfg := huma.DefaultConfig("GeoParquet Tile Server", "0.1.0")
-	humaCfg.Info.Description = "A small STAC + GeoParquet vector tile server."
+	humaCfg.Info.Description = "A small STAC + GeoParquet vector tile server with browseable HTML views."
 	api := humachi.New(router, humaCfg)
 
 	huma.Register(api, huma.Operation{
@@ -290,8 +594,18 @@ func main() {
 
 	huma.Register(api, huma.Operation{
 		OperationID: "list-collections", Method: http.MethodGet,
-		Path: "/collections", Summary: "List collections",
+		Path: "/collections", Summary: "List collections and virtual groups",
 	}, s.collections)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "get-collection", Method: http.MethodGet,
+		Path: "/collections/{collection}", Summary: "Get collection metadata",
+	}, s.collection)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "list-items", Method: http.MethodGet,
+		Path: "/collections/{collection}/items", Summary: "List STAC items and passthrough assets",
+	}, s.items)
 
 	huma.Register(api, huma.Operation{
 		OperationID: "health", Method: http.MethodGet, Path: "/healthz", Summary: "Health",
@@ -315,4 +629,142 @@ func main() {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}
+}
+
+// proxyAsset streams a local or remote STAC asset. Remote range headers are
+// forwarded so Parquet consumers can keep using HTTP range reads.
+func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, contentType string) {
+	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
+		method := r.Method
+		if method == "" {
+			method = http.MethodGet
+		}
+		req, err := http.NewRequestWithContext(r.Context(), method, href, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		req.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
+		for _, h := range []string{"Range", "If-None-Match", "If-Modified-Since"} {
+			if v := r.Header.Get(h); v != "" {
+				req.Header.Set(h, v)
+			}
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for _, h := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag", "Last-Modified"} {
+			if v := resp.Header.Get(h); v != "" {
+				w.Header().Set(h, v)
+			}
+		}
+		if contentType != "" && w.Header().Get("Content-Type") == "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.WriteHeader(resp.StatusCode)
+		if r.Method != http.MethodHead {
+			_, _ = io.Copy(w, resp.Body)
+		}
+		return
+	}
+	f, err := os.Open(href)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil || st.IsDir() {
+		http.Error(w, "not a file", http.StatusNotFound)
+		return
+	}
+	if contentType != "" {
+		w.Header().Set("Content-Type", contentType)
+	}
+	http.ServeContent(w, r, filepath.Base(href), st.ModTime(), f)
+}
+
+func (s *server) catalogSTAC(w http.ResponseWriter, r *http.Request) {
+	st := s.state(r.URL.Query().Get("catalog"))
+	if st == nil || st.base == "" {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, st.base, "application/json")
+}
+
+func (s *server) collectionSTAC(w http.ResponseWriter, r *http.Request) {
+	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	if err != nil || entry.collection == nil {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, entry.collection.Base, "application/json")
+}
+
+func (s *server) collectionAsset(w http.ResponseWriter, r *http.Request) {
+	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	if err != nil || entry.collection == nil {
+		http.NotFound(w, r)
+		return
+	}
+	asset, ok := entry.collection.Assets[chi.URLParam(r, "asset")]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, catalog.Resolve(entry.collection.Base, asset.Href), asset.Type)
+}
+
+func (s *server) findItem(entry *layerEntry, id string) (catalog.Item, bool) {
+	if entry.collection == nil {
+		return catalog.Item{}, false
+	}
+	items, err := entry.collection.Items()
+	if err != nil {
+		return catalog.Item{}, false
+	}
+	for _, it := range items {
+		if it.ID == id {
+			return it, true
+		}
+	}
+	return catalog.Item{}, false
+}
+
+func (s *server) itemSTAC(w http.ResponseWriter, r *http.Request) {
+	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	it, ok := s.findItem(entry, chi.URLParam(r, "item"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, it.Base, "application/json")
+}
+
+func (s *server) itemAsset(w http.ResponseWriter, r *http.Request) {
+	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	it, ok := s.findItem(entry, chi.URLParam(r, "item"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	asset, ok := it.Assets[chi.URLParam(r, "asset")]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, catalog.Resolve(it.Base, asset.Href), asset.Type)
 }

@@ -1,11 +1,11 @@
 # Overture data access guide:
 # https://docs.overturemaps.org/getting-data/cloud-sources/
 #
-# The human docs above are not a STAC catalog. This is the machine-readable
-# Overture STAC. A release-specific collection is smaller to load:
-catalog: "https://stac.overturemaps.org/2026-10-21.0/divisions/division_area/collection.json"
+# This is Overture's machine-readable STAC root. The server follows the newest
+# release and auto-generates collection URLs from STAC collection IDs.
+catalog: "https://stac.overturemaps.org/catalog.json"
 
-# Named catalogs can be selected per request with ?catalog=<name>.
+# Named catalogs can be selected with ?catalog=<name> or ?catalog=<url>.
 catalogs:
   mappinginequality: "https://data.source.coop/cboettig/mappinginequality/stac-collection.json"
 
@@ -16,7 +16,10 @@ base_url: "http://127.0.0.1:8080"
 cache_tiles: 4096
 preload: false
 
-layers:
-  - name: features
-    min_zoom: 0
-    max_zoom: 14
+# Layers are normally generated from the STAC collections automatically.
+# Add layers only to rename, subset, or change zoom ranges:
+# layers:
+#   - name: places
+#     collection: place
+#     min_zoom: 0
+#     max_zoom: 14

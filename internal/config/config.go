@@ -43,9 +43,6 @@ func Load(path string) (*Config, error) {
 	if c.Catalog == "" {
 		c.Catalog = "https://stac.overturemaps.org/catalog.json"
 	}
-	if len(c.Layers) == 0 {
-		return nil, fmt.Errorf("at least one layer is required")
-	}
 	for i := range c.Layers {
 		if c.Layers[i].Name == "" {
 			return nil, fmt.Errorf("layer %d: name is required", i)

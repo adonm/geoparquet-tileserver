@@ -4,6 +4,7 @@ package tiles
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/clip"
@@ -32,13 +33,23 @@ type Layer struct {
 	Bounds  orb.Bound
 
 	geomCol    string
-	overview   *Dataset
 	partitions []*partitionRef
 }
 
 type partitionRef struct {
-	ds    *Dataset
-	bound orb.Bound
+	asset   string
+	geomCol string
+	bound   orb.Bound
+	once    sync.Once
+	ds      *Dataset
+	err     error
+}
+
+func (p *partitionRef) get() (*Dataset, error) {
+	p.once.Do(func() {
+		p.ds, p.err = openDataset(p.asset, p.geomCol)
+	})
+	return p.ds, p.err
 }
 
 func New(opts Options, items []catalog.Item) (*Layer, error) {
@@ -48,29 +59,21 @@ func New(opts Options, items []catalog.Item) (*Layer, error) {
 		if !ok {
 			continue
 		}
-		ds, err := openDataset(asset, opts.GeometryColumn)
-		if err != nil {
-			return nil, fmt.Errorf("layer %q: %w", opts.Name, err)
-		}
-		if ds.overview {
-			l.overview = ds
-			if opts.Preload {
-				for i := range ds.levels {
-					if _, err := ds.BoundsForLevel(i); err != nil {
-						return nil, fmt.Errorf("preload %s: %w", opts.Name, err)
-					}
-				}
-			}
-			break
-		}
-		l.partitions = append(l.partitions, &partitionRef{ds: ds, bound: it.Bound()})
+		pr := &partitionRef{asset: asset, geomCol: opts.GeometryColumn, bound: it.Bound()}
+		l.partitions = append(l.partitions, pr)
 		if opts.Preload {
-			if _, err := ds.BoundsForLevel(0); err != nil {
+			ds, err := pr.get()
+			if err != nil {
 				return nil, fmt.Errorf("preload %s: %w", opts.Name, err)
+			}
+			for i := range ds.levels {
+				if _, err := ds.BoundsForLevel(i); err != nil {
+					return nil, fmt.Errorf("preload %s: %w", opts.Name, err)
+				}
 			}
 		}
 	}
-	if l.overview == nil && len(l.partitions) == 0 {
+	if len(l.partitions) == 0 {
 		return nil, fmt.Errorf("layer %q: no GeoParquet assets", opts.Name)
 	}
 	l.Bounds = itemsBounds(items)
@@ -124,9 +127,19 @@ func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int,
 		return nil
 	}
 
-	if l.overview != nil {
-		level := l.overview.LevelForZoom(int(z))
-		bounds, err := l.overview.BoundsForLevel(level)
+	for _, p := range l.partitions {
+		if !intersects(p.bound, tb) {
+			continue
+		}
+		ds, err := p.get()
+		if err != nil {
+			return nil, err
+		}
+		level := 0
+		if ds.overview {
+			level = ds.LevelForZoom(int(z))
+		}
+		bounds, err := ds.BoundsForLevel(level)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +151,7 @@ func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int,
 				return nil, err
 			}
 			var addErr error
-			if err := l.overview.ScanRowGroup(rgb.Index, func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) {
+			if err := ds.ScanRowGroup(rgb.Index, func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) {
 				if addErr == nil {
 					addErr = add(geom, bound, hasBBox, props)
 				}
@@ -147,35 +160,6 @@ func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int,
 			}
 			if addErr != nil {
 				return nil, addErr
-			}
-		}
-	} else {
-		for _, p := range l.partitions {
-			if !intersects(p.bound, tb) {
-				continue
-			}
-			bounds, err := p.ds.BoundsForLevel(0)
-			if err != nil {
-				return nil, err
-			}
-			for _, rgb := range bounds {
-				if !intersects(rgb.Bound, tb) {
-					continue
-				}
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				var addErr error
-				if err := p.ds.ScanRowGroup(rgb.Index, func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) {
-					if addErr == nil {
-						addErr = add(geom, bound, hasBBox, props)
-					}
-				}); err != nil {
-					return nil, err
-				}
-				if addErr != nil {
-					return nil, addErr
-				}
 			}
 		}
 	}
