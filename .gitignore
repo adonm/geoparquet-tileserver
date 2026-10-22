@@ -1,0 +1,6 @@
+/config.yaml
+/geoparquet-tileserver
+/bin/
+/tmp/
+*.log
+config.local.yaml

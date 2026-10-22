@@ -1,0 +1,9 @@
+listen: "127.0.0.1:8080"
+base_url: "http://127.0.0.1:8080"
+catalog: "/tmp/opencode/tegola-gp/overview_item.json"
+cache_tiles: 4096
+preload: true
+layers:
+  - name: cells
+    min_zoom: 0
+    max_zoom: 14
