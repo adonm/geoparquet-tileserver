@@ -61,11 +61,9 @@ same order of magnitude as an in-memory hit.
 3. **Disk caching is essential.** The implemented cache stores both generated
    tiles and 1 MiB HTTP range chunks. After a restart, the tested remote view
    went from ~5.9 s to ~26 ms.
-4. **Raw asset passthrough is still streamed.** The API's Parquet reader and
-   generated tiles use the disk range cache, but a client reading a raw
-   Parquet/PMTiles asset through the passthrough route still goes to the
-   upstream server for each request. A chunked range cache for passthrough
-   assets is the next caching improvement.
+4. **Raw asset passthrough ranges are chunk-cached now.** Finite range
+   requests up to 8 MiB are assembled from 1 MiB disk-cached chunks. Full
+   downloads and open-ended ranges still stream directly.
 5. **PMTiles is the better serving format for static layers.** Use PMTiles for
    precomputed, unfiltered map layers; use the GeoParquet API for filtering,
    dynamic properties, and data that changes too often to pre-tile.

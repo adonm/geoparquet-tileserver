@@ -728,6 +728,160 @@ func contentRangeTotal(v string) (int64, bool) {
 	return n, err == nil && n > 0
 }
 
+type assetMeta struct {
+	Total       int64  `json:"total"`
+	ContentType string `json:"content_type"`
+}
+
+func parseRangeHeader(v string) (int64, int64, bool) {
+	if !strings.HasPrefix(v, "bytes=") || strings.Contains(v, ",") {
+		return 0, 0, false
+	}
+	startText, endText, ok := strings.Cut(strings.TrimPrefix(v, "bytes="), "-")
+	if !ok || startText == "" || endText == "" {
+		return 0, 0, false
+	}
+	start, err1 := strconv.ParseInt(startText, 10, 64)
+	end, err2 := strconv.ParseInt(endText, 10, 64)
+	if err1 != nil || err2 != nil || start < 0 || end < start {
+		return 0, 0, false
+	}
+	return start, end, true
+}
+
+func (s *server) assetInfo(r *http.Request, href, fallbackType string) (assetMeta, bool) {
+	meta := assetMeta{ContentType: fallbackType}
+	if s.disk != nil {
+		if raw, ok := s.disk.Get("asset-meta", href); ok {
+			var cached assetMeta
+			if json.Unmarshal(raw, &cached) == nil && cached.Total > 0 {
+				return cached, true
+			}
+		}
+	}
+	head, err := http.NewRequestWithContext(r.Context(), http.MethodHead, href, nil)
+	if err == nil {
+		head.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
+		if resp, err := http.DefaultClient.Do(head); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				if n, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); err == nil && n > 0 {
+					meta.Total = n
+					if ct := resp.Header.Get("Content-Type"); ct != "" {
+						meta.ContentType = ct
+					}
+				}
+			}
+		}
+	}
+	if meta.Total <= 0 {
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, href, nil)
+		if err != nil {
+			return assetMeta{}, false
+		}
+		req.Header.Set("Range", "bytes=0-0")
+		req.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return assetMeta{}, false
+		}
+		defer resp.Body.Close()
+		if total, ok := contentRangeTotal(resp.Header.Get("Content-Range")); ok {
+			meta.Total = total
+		}
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			meta.ContentType = ct
+		}
+	}
+	if meta.Total <= 0 {
+		return assetMeta{}, false
+	}
+	if s.disk != nil {
+		if raw, err := json.Marshal(meta); err == nil {
+			s.disk.Put("asset-meta", href, raw)
+		}
+	}
+	return meta, true
+}
+
+func (s *server) serveCachedRange(w http.ResponseWriter, r *http.Request, href string, start, end int64, contentType string) bool {
+	// Only cache small, finite ranges. Larger requests stream as before.
+	if s.disk == nil || end < start || end-start > 8<<20 {
+		return false
+	}
+	meta, ok := s.assetInfo(r, href, contentType)
+	if !ok {
+		return false
+	}
+	if start >= meta.Total {
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return true
+	}
+	if end >= meta.Total {
+		end = meta.Total - 1
+	}
+	const chunkSize = 1 << 20
+	first := start - start%chunkSize
+	last := end - end%chunkSize
+	var body []byte
+	for off := first; off <= last; off += chunkSize {
+		key := href + "|" + strconv.FormatInt(off, 10)
+		var chunk []byte
+		if b, ok := s.disk.Get("ranges", key); ok {
+			chunk = b
+		} else {
+			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, href, nil)
+			if err != nil {
+				return false
+			}
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+chunkSize-1))
+			req.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return false
+			}
+			chunk, err = io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil || (resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK) {
+				return false
+			}
+			s.disk.Put("ranges", key, chunk)
+		}
+		from := int64(0)
+		if off == first {
+			from = start - first
+		}
+		to := int64(len(chunk))
+		if off == last {
+			to = end - last + 1
+			if to > int64(len(chunk)) {
+				to = int64(len(chunk))
+			}
+		}
+		if from < to {
+			body = append(body, chunk[from:to]...)
+		}
+	}
+	if len(body) == 0 && start <= end {
+		return false
+	}
+	ct := meta.ContentType
+	if ct == "" {
+		ct = contentType
+	}
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Accept-Ranges", "bytes")
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, meta.Total))
+	w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusPartialContent)
+	_, _ = w.Write(body)
+	return true
+}
+
 // proxyAsset streams a local or remote STAC asset. Remote range headers are
 // forwarded so Parquet consumers can keep using HTTP range reads.
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, contentType string) {
@@ -737,6 +891,11 @@ func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, conten
 			method = http.MethodGet
 		}
 		headRequest := method == http.MethodHead
+		if !headRequest {
+			if start, end, ok := parseRangeHeader(r.Header.Get("Range")); ok && s.serveCachedRange(w, r, href, start, end, contentType) {
+				return
+			}
+		}
 		// Some CDNs (notably the Overture PMTiles bucket) reject HEAD and
 		// open-ended ranges. A one-byte GET gives us the total length for a
 		// standards-compliant HEAD response.
