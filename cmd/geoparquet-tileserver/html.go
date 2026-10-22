@@ -277,6 +277,13 @@ func (s *server) catalogQuery(name string) string {
 	return "?catalog=" + url.QueryEscape(name)
 }
 
+func catalogPathPrefix(name string) string {
+	if name == "" || name == "default" {
+		return ""
+	}
+	return "/catalogs/" + url.PathEscape(name)
+}
+
 func rustgisURL(param, value string) string {
 	if value == "" {
 		return ""
@@ -315,6 +322,11 @@ func dataAssetSuffix(a htmlAsset) string {
 
 func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) htmlCollection {
 	q := s.catalogQuery(catalog)
+	prefix := catalogPathPrefix(catalog)
+	assetQ := q
+	if prefix != "" {
+		assetQ = ""
+	}
 	base := strings.TrimRight(s.cfg.BaseURL, "/")
 	id := url.PathEscape(e.name)
 	b := e.bounds()
@@ -327,7 +339,7 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 		TileURL:     base + "/collections/" + id + "/tiles/{z}/{x}/{y}.mvt" + q,
 	}
 	if e.collection != nil {
-		hc.STACURL = base + "/collections/" + id + "/stac" + q
+		hc.STACURL = base + prefix + "/collections/" + id + "/stac" + assetQ
 		hc.ItemsURL = base + "/collections/" + id + "/items.html" + q
 		names := make([]string, 0, len(e.collection.Assets))
 		for name := range e.collection.Assets {
@@ -336,10 +348,10 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 		sort.Strings(names)
 		for _, name := range names {
 			a := e.collection.Assets[name]
-			assetURL := base + "/collections/" + id + "/assets/" + url.PathEscape(name) + q
+			assetURL := base + prefix + "/collections/" + id + "/assets/" + url.PathEscape(name) + assetQ
 			ha := htmlAsset{Name: name, Type: a.Type, URL: assetURL}
 			if suffix := dataAssetSuffix(ha); suffix != "" {
-				assetURL = base + "/collections/" + id + "/assets/" + url.PathEscape(name) + suffix + q
+				assetURL = base + prefix + "/collections/" + id + "/assets/" + url.PathEscape(name) + suffix + assetQ
 				ha.URL = assetURL
 			}
 			if isDataAsset(ha) {
@@ -349,10 +361,10 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 		}
 	}
 	if e.group != nil && e.group.Base != "" {
-		hc.STACURL = base + "/collections/" + id + "/stac" + q
+		hc.STACURL = base + prefix + "/collections/" + id + "/stac" + assetQ
 	}
 	if e.group != nil && e.group.PMTiles != "" {
-		hc.PMTilesURL = base + "/collections/" + id + "/pmtiles.pmtiles" + q
+		hc.PMTilesURL = base + prefix + "/collections/" + id + "/pmtiles.pmtiles" + assetQ
 		hc.RustGISURL = rustgisDataURL(hc.PMTilesURL)
 	}
 	if hc.TileURL != "" && hc.RustGISURL == "" {
@@ -447,6 +459,11 @@ func (s *server) itemsHTML(w http.ResponseWriter, r *http.Request) {
 	q := s.catalogQuery(selected)
 	id := url.PathEscape(e.name)
 	base := strings.TrimRight(s.cfg.BaseURL, "/")
+	prefix := catalogPathPrefix(selected)
+	assetQ := q
+	if prefix != "" {
+		assetQ = ""
+	}
 	page := itemsPage{Title: e.title + " items", Catalog: q, Collection: id}
 	for _, it := range items {
 		v := itemView{ID: it.ID, BBox: fmt.Sprintf("%v", it.BBox), STAC: "/collections/" + id + "/items/" + url.PathEscape(it.ID) + q}
@@ -456,10 +473,10 @@ func (s *server) itemsHTML(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			assetURL := base + "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + q
+			assetURL := base + prefix + "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + assetQ
 			ha := htmlAsset{Name: name, URL: assetURL, Type: it.Assets[name].Type}
 			if suffix := dataAssetSuffix(ha); suffix != "" {
-				assetURL = base + "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + suffix + q
+				assetURL = base + prefix + "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + suffix + assetQ
 				ha.URL = assetURL
 			}
 			if isDataAsset(ha) {

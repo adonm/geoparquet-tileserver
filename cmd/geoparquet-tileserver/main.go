@@ -591,6 +591,16 @@ func main() {
 	router.Get("/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
 	router.Get("/collections/{collection}/items/{item}/assets/{asset}.parquet", s.itemAsset)
 	router.Get("/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
+	router.Get("/catalogs/{catalog}/stac", s.catalogSTAC)
+	router.Get("/catalogs/{catalog}/collections/{collection}/stac", s.collectionSTAC)
+	router.Get("/catalogs/{catalog}/collections/{collection}/assets/{asset}", s.collectionAsset)
+	router.Get("/catalogs/{catalog}/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
+	router.Get("/catalogs/{catalog}/collections/{collection}/assets/{asset}.pmtiles", s.collectionAsset)
+	router.Get("/catalogs/{catalog}/collections/{collection}/pmtiles.pmtiles", s.groupPMTiles)
+	router.Get("/catalogs/{catalog}/collections/{collection}/items/{item}", s.itemSTAC)
+	router.Get("/catalogs/{catalog}/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
+	router.Get("/catalogs/{catalog}/collections/{collection}/items/{item}/assets/{asset}.parquet", s.itemAsset)
+	router.Get("/catalogs/{catalog}/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
 	router.Head("/stac", s.catalogSTAC)
 	router.Head("/collections/{collection}/stac", s.collectionSTAC)
 	router.Head("/collections/{collection}/assets/{asset}", s.collectionAsset)
@@ -601,6 +611,16 @@ func main() {
 	router.Head("/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
 	router.Head("/collections/{collection}/items/{item}/assets/{asset}.parquet", s.itemAsset)
 	router.Head("/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
+	router.Head("/catalogs/{catalog}/stac", s.catalogSTAC)
+	router.Head("/catalogs/{catalog}/collections/{collection}/stac", s.collectionSTAC)
+	router.Head("/catalogs/{catalog}/collections/{collection}/assets/{asset}", s.collectionAsset)
+	router.Head("/catalogs/{catalog}/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
+	router.Head("/catalogs/{catalog}/collections/{collection}/assets/{asset}.pmtiles", s.collectionAsset)
+	router.Head("/catalogs/{catalog}/collections/{collection}/pmtiles.pmtiles", s.groupPMTiles)
+	router.Head("/catalogs/{catalog}/collections/{collection}/items/{item}", s.itemSTAC)
+	router.Head("/catalogs/{catalog}/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
+	router.Head("/catalogs/{catalog}/collections/{collection}/items/{item}/assets/{asset}.parquet", s.itemAsset)
+	router.Head("/catalogs/{catalog}/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
 
 	humaCfg := huma.DefaultConfig("GeoParquet Tile Server", "0.1.0")
 	humaCfg.Info.Description = "A small STAC + GeoParquet vector tile server with browseable HTML views."
@@ -659,6 +679,13 @@ func main() {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}
+}
+
+func catalogFromRequest(r *http.Request) string {
+	if c := chi.URLParam(r, "catalog"); c != "" {
+		return c
+	}
+	return r.URL.Query().Get("catalog")
 }
 
 func contentRangeTotal(v string) (int64, bool) {
@@ -750,7 +777,7 @@ func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, conten
 }
 
 func (s *server) catalogSTAC(w http.ResponseWriter, r *http.Request) {
-	st := s.state(r.URL.Query().Get("catalog"))
+	st := s.state(catalogFromRequest(r))
 	if st == nil || st.base == "" {
 		http.NotFound(w, r)
 		return
@@ -759,7 +786,7 @@ func (s *server) catalogSTAC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) groupPMTiles(w http.ResponseWriter, r *http.Request) {
-	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	_, entry, err := s.entry(catalogFromRequest(r), chi.URLParam(r, "collection"))
 	if err != nil || entry.group == nil || entry.group.PMTiles == "" {
 		http.NotFound(w, r)
 		return
@@ -768,7 +795,7 @@ func (s *server) groupPMTiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) collectionSTAC(w http.ResponseWriter, r *http.Request) {
-	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	_, entry, err := s.entry(catalogFromRequest(r), chi.URLParam(r, "collection"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -787,7 +814,7 @@ func (s *server) collectionSTAC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) collectionAsset(w http.ResponseWriter, r *http.Request) {
-	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	_, entry, err := s.entry(catalogFromRequest(r), chi.URLParam(r, "collection"))
 	if err != nil || entry.collection == nil {
 		http.NotFound(w, r)
 		return
@@ -817,7 +844,7 @@ func (s *server) findItem(entry *layerEntry, id string) (catalog.Item, bool) {
 }
 
 func (s *server) itemSTAC(w http.ResponseWriter, r *http.Request) {
-	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	_, entry, err := s.entry(catalogFromRequest(r), chi.URLParam(r, "collection"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -831,7 +858,7 @@ func (s *server) itemSTAC(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) itemAsset(w http.ResponseWriter, r *http.Request) {
-	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	_, entry, err := s.entry(catalogFromRequest(r), chi.URLParam(r, "collection"))
 	if err != nil {
 		http.NotFound(w, r)
 		return
