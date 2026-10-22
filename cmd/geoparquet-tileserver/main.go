@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -582,6 +584,7 @@ func main() {
 	router.Get("/collections.html", s.collectionsHTML)
 	router.Get("/collections/{collection}.html", s.collectionHTML)
 	router.Get("/collections/{collection}/items.html", s.itemsHTML)
+	router.Get("/collections/{collection}/style.json", s.collectionStyle)
 	router.Get("/collections/{collection}/stac", s.collectionSTAC)
 	router.Get("/collections/{collection}/assets/{asset}", s.collectionAsset)
 	router.Get("/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
@@ -593,6 +596,7 @@ func main() {
 	router.Get("/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
 	router.Get("/catalogs/{catalog}/stac", s.catalogSTAC)
 	router.Get("/catalogs/{catalog}/collections/{collection}/stac", s.collectionSTAC)
+	router.Get("/catalogs/{catalog}/collections/{collection}/style.json", s.collectionStyle)
 	router.Get("/catalogs/{catalog}/collections/{collection}/assets/{asset}", s.collectionAsset)
 	router.Get("/catalogs/{catalog}/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
 	router.Get("/catalogs/{catalog}/collections/{collection}/assets/{asset}.pmtiles", s.collectionAsset)
@@ -603,6 +607,7 @@ func main() {
 	router.Get("/catalogs/{catalog}/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
 	router.Head("/stac", s.catalogSTAC)
 	router.Head("/collections/{collection}/stac", s.collectionSTAC)
+	router.Head("/collections/{collection}/style.json", s.collectionStyle)
 	router.Head("/collections/{collection}/assets/{asset}", s.collectionAsset)
 	router.Head("/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
 	router.Head("/collections/{collection}/assets/{asset}.pmtiles", s.collectionAsset)
@@ -613,6 +618,7 @@ func main() {
 	router.Head("/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
 	router.Head("/catalogs/{catalog}/stac", s.catalogSTAC)
 	router.Head("/catalogs/{catalog}/collections/{collection}/stac", s.collectionSTAC)
+	router.Head("/catalogs/{catalog}/collections/{collection}/style.json", s.collectionStyle)
 	router.Head("/catalogs/{catalog}/collections/{collection}/assets/{asset}", s.collectionAsset)
 	router.Head("/catalogs/{catalog}/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
 	router.Head("/catalogs/{catalog}/collections/{collection}/assets/{asset}.pmtiles", s.collectionAsset)
@@ -774,6 +780,64 @@ func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, conten
 		w.Header().Set("Content-Type", contentType)
 	}
 	http.ServeContent(w, r, filepath.Base(href), st.ModTime(), f)
+}
+
+func (s *server) collectionStyle(w http.ResponseWriter, r *http.Request) {
+	catalogName := catalogFromRequest(r)
+	_, entry, err := s.entry(catalogName, chi.URLParam(r, "collection"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	q := ""
+	if catalogName != "" && catalogName != "default" {
+		q = "?catalog=" + url.QueryEscape(catalogName)
+	}
+	base := strings.TrimRight(s.cfg.BaseURL, "/")
+	id := url.PathEscape(entry.name)
+	tileURL := base + "/collections/" + id + "/tiles/{z}/{x}/{y}.mvt" + q
+	b := entry.bounds()
+	span := math.Max(b.Max.X()-b.Min.X(), b.Max.Y()-b.Min.Y())
+	zoom := 4
+	if span > 0 {
+		zoom = int(math.Log2(360/span)) + 1
+	}
+	if zoom < 0 {
+		zoom = 0
+	}
+	if zoom > 14 {
+		zoom = 14
+	}
+	lon := (b.Min.X() + b.Max.X()) / 2
+	lat := (b.Min.Y() + b.Max.Y()) / 2
+
+	style := map[string]any{
+		"version": 8,
+		"name":    entry.title,
+		"center":  []float64{lon, lat},
+		"zoom":    zoom,
+		"sources": map[string]any{
+			"tiles": map[string]any{
+				"type":    "vector",
+				"tiles":   []string{tileURL},
+				"minzoom": entry.minZoom(),
+				"maxzoom": entry.maxZoom(),
+				"bounds":  []float64{b.Min.X(), b.Min.Y(), b.Max.X(), b.Max.Y()},
+			},
+		},
+		"layers": []any{
+			map[string]any{"id": "background", "type": "background", "paint": map[string]any{"background-color": "#f4f1ea"}},
+			map[string]any{"id": "fill", "type": "fill", "source": "tiles", "source-layer": entry.name,
+				"paint": map[string]any{"fill-color": "#e4783d", "fill-opacity": 0.38, "fill-outline-color": "#8a4a1f"}},
+			map[string]any{"id": "line", "type": "line", "source": "tiles", "source-layer": entry.name,
+				"paint": map[string]any{"line-color": "#7a3c18", "line-width": 0.8}},
+			map[string]any{"id": "point", "type": "circle", "source": "tiles", "source-layer": entry.name,
+				"paint": map[string]any{"circle-color": "#d95f02", "circle-radius": 3, "circle-opacity": 0.85}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_ = json.NewEncoder(w).Encode(style)
 }
 
 func (s *server) catalogSTAC(w http.ResponseWriter, r *http.Request) {
