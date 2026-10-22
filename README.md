@@ -90,22 +90,22 @@ The UI uses Bootstrap 5.3.8 from jsDelivr. Bootstrap 6 has not been released;
 
 ### RustGIS links
 
-Catalog, collection, and group pages include an **Open in RustGIS** button.
-It uses the RustGIS web-app link format:
+Catalog rows and collection pages include **Open tiles in RustGIS** links to
+the generated MVT layer, using RustGIS's `?tiles=` parameter:
 
 ```text
-https://web.rustgis.app/?stac=<url-encoded-catalog-or-collection-json>
+https://web.rustgis.app/?tiles=<url-encoded /collections/{id}/tiles/{z}/{x}/{y}.mvt>
 ```
 
-For example:
+Parquet and PMTiles passthrough assets get **open data** links using `?data=`:
 
 ```text
-https://web.rustgis.app/?stac=https%3A%2F%2Fexample.org%2Fcollections%2Fdivisions%2Fstac
+https://web.rustgis.app/?data=<url-encoded passthrough asset URL>
 ```
 
-RustGIS opens static catalogs and collections, including their raw assets.
-The server sends CORS headers so the browser-based app can fetch the catalog,
-items, and range requests.
+The links open tile layers or files directly; they do not send RustGIS back to
+the STAC catalog. The server sends CORS headers and supports range requests so
+RustGIS can read the data.
 
 ## Passthrough routes
 

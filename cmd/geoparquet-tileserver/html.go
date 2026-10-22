@@ -12,9 +12,10 @@ import (
 )
 
 type htmlAsset struct {
-	Name string
-	Type string
-	URL  string
+	Name       string
+	Type       string
+	URL        string
+	RustGISURL string
 }
 
 type htmlLink struct {
@@ -94,7 +95,6 @@ var collectionsTemplate = template.Must(template.New("collections").Parse(`<!doc
     <a class="navbar-brand fw-semibold" href="/">GeoParquet Tile Server</a>
     <div class="d-flex flex-wrap gap-2 align-items-center">
       <a class="btn btn-sm btn-outline-secondary" href="/docs">API docs</a>
-      {{if .RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.RustGISURL}}" target="_blank" rel="noopener">Open catalog in RustGIS</a>{{end}}
     </div>
   </div>
 </nav>
@@ -130,7 +130,7 @@ var collectionsTemplate = template.Must(template.New("collections").Parse(`<!doc
                 <a href="{{.TileJSONURL}}">TileJSON</a>
                 {{if .ItemsURL}}<a href="{{.ItemsURL}}">Items / assets</a>{{end}}
                 {{if .STACURL}}<a href="{{.STACURL}}">STAC</a>{{end}}
-                {{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">RustGIS ↗</a>{{end}}
+                {{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">Tiles in RustGIS ↗</a>{{end}}
               </div>
             </td>
           </tr>
@@ -176,7 +176,7 @@ var collectionTemplate = template.Must(template.New("collection").Parse(`<!docty
       <a class="btn btn-sm btn-outline-primary" href="{{.Collection.TileJSONURL}}">TileJSON</a>
       {{if .Collection.ItemsURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.ItemsURL}}">Items / raw assets</a>{{end}}
       {{if .Collection.STACURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.STACURL}}">Raw STAC</a>{{end}}
-      {{if .Collection.RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.Collection.RustGISURL}}" target="_blank" rel="noopener">Open in RustGIS ↗</a>{{end}}
+      {{if .Collection.RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.Collection.RustGISURL}}" target="_blank" rel="noopener">Open tiles in RustGIS ↗</a>{{end}}
     </div>
   </div>
   <div class="row g-3">
@@ -209,8 +209,8 @@ var collectionTemplate = template.Must(template.New("collection").Parse(`<!docty
   {{if .Collection.Assets}}
   <h2 class="h5 mt-4">Collection assets</h2>
   <div class="card shadow-sm"><div class="table-responsive"><table class="table table-sm mb-0">
-    <thead class="table-light"><tr><th>Name</th><th>Type</th><th>Passthrough</th></tr></thead>
-    <tbody>{{range .Collection.Assets}}<tr><td><code>{{.Name}}</code></td><td class="text-secondary">{{.Type}}</td><td><a href="{{.URL}}">open</a></td></tr>{{end}}</tbody>
+    <thead class="table-light"><tr><th>Name</th><th>Type</th><th>Passthrough</th><th>RustGIS</th></tr></thead>
+    <tbody>{{range .Collection.Assets}}<tr><td><code>{{.Name}}</code></td><td class="text-secondary">{{.Type}}</td><td><a href="{{.URL}}">open</a></td><td>{{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">open data ↗</a>{{else}}<span class="text-secondary">—</span>{{end}}</td></tr>{{end}}</tbody>
   </table></div></div>
   {{end}}
   {{if .Collection.Children}}
@@ -247,12 +247,13 @@ var itemsTemplate = template.Must(template.New("items").Parse(`<!doctype html>
 <main class="container py-4">
   <h1 class="h3 mb-3">{{.Title}}</h1>
   <div class="card shadow-sm"><div class="table-responsive"><table class="table table-hover align-middle mb-0">
-    <thead class="table-light"><tr><th>Item</th><th>BBox</th><th>STAC</th><th>Raw assets</th></tr></thead>
+    <thead class="table-light"><tr><th>Item</th><th>BBox</th><th>STAC</th><th>Raw assets</th><th>RustGIS</th></tr></thead>
     <tbody>{{range .Items}}<tr>
       <td><code>{{.ID}}</code></td>
       <td class="small text-secondary"><code>{{.BBox}}</code></td>
       <td><a href="{{.STAC}}">STAC</a></td>
       <td class="small">{{range .Assets}}<a class="me-2" href="{{.URL}}">{{.Name}}</a>{{end}}</td>
+      <td class="small">{{range .Assets}}{{if .RustGISURL}}<a class="me-2" href="{{.RustGISURL}}" target="_blank" rel="noopener">{{.Name}} ↗</a>{{end}}{{end}}</td>
     </tr>{{end}}</tbody>
   </table></div></div>
 </main>
@@ -274,11 +275,28 @@ func (s *server) catalogQuery(name string) string {
 	return "?catalog=" + url.QueryEscape(name)
 }
 
-func rustgisURL(stac string) string {
-	if stac == "" {
+func rustgisURL(param, value string) string {
+	if value == "" {
 		return ""
 	}
-	return "https://web.rustgis.app/?stac=" + url.QueryEscape(stac)
+	return "https://web.rustgis.app/?" + param + "=" + url.QueryEscape(value)
+}
+
+func rustgisTilesURL(template string) string {
+	return rustgisURL("tiles", template)
+}
+
+func rustgisDataURL(assetURL string) string {
+	return rustgisURL("data", assetURL)
+}
+
+func isDataAsset(a htmlAsset) bool {
+	name := strings.ToLower(a.Name)
+	typ := strings.ToLower(a.Type)
+	if strings.Contains(typ, "parquet") || strings.Contains(typ, "pmtiles") {
+		return true
+	}
+	return strings.Contains(name, ".parquet") || strings.Contains(name, "parquet") || strings.HasSuffix(name, ".pmtiles") || strings.Contains(name, "pmtiles")
 }
 
 func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) htmlCollection {
@@ -304,17 +322,19 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 		sort.Strings(names)
 		for _, name := range names {
 			a := e.collection.Assets[name]
-			hc.Assets = append(hc.Assets, htmlAsset{
-				Name: name, Type: a.Type,
-				URL: base + "/collections/" + id + "/assets/" + url.PathEscape(name) + q,
-			})
+			assetURL := base + "/collections/" + id + "/assets/" + url.PathEscape(name) + q
+			ha := htmlAsset{Name: name, Type: a.Type, URL: assetURL}
+			if isDataAsset(ha) {
+				ha.RustGISURL = rustgisDataURL(assetURL)
+			}
+			hc.Assets = append(hc.Assets, ha)
 		}
 	}
 	if e.group != nil && e.group.Base != "" {
 		hc.STACURL = base + "/collections/" + id + "/stac" + q
 	}
-	if hc.STACURL != "" {
-		hc.RustGISURL = rustgisURL(hc.STACURL)
+	if hc.TileURL != "" {
+		hc.RustGISURL = rustgisTilesURL(hc.TileURL)
 	}
 	if e.group != nil {
 		for _, child := range e.group.Collections {
@@ -360,9 +380,6 @@ func (s *server) collectionsHTML(w http.ResponseWriter, r *http.Request) {
 	page := collectionsPage{
 		Title: "Collections · GeoParquet Tile Server", Catalog: selected, CatalogURL: q, Catalogs: catalogs,
 	}
-	if base := strings.TrimRight(s.cfg.BaseURL, "/"); base != "" {
-		page.RustGISURL = rustgisURL(base + "/stac" + q)
-	}
 	for _, name := range st.order {
 		page.Collections = append(page.Collections, s.htmlCollection(st, st.layers[name], selected))
 	}
@@ -407,6 +424,7 @@ func (s *server) itemsHTML(w http.ResponseWriter, r *http.Request) {
 	}
 	q := s.catalogQuery(selected)
 	id := url.PathEscape(e.name)
+	base := strings.TrimRight(s.cfg.BaseURL, "/")
 	page := itemsPage{Title: e.title + " items", Catalog: q, Collection: id}
 	for _, it := range items {
 		v := itemView{ID: it.ID, BBox: fmt.Sprintf("%v", it.BBox), STAC: "/collections/" + id + "/items/" + url.PathEscape(it.ID) + q}
@@ -416,7 +434,12 @@ func (s *server) itemsHTML(w http.ResponseWriter, r *http.Request) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			v.Assets = append(v.Assets, htmlAsset{Name: name, URL: "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + q})
+			assetURL := base + "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + q
+			ha := htmlAsset{Name: name, URL: assetURL, Type: it.Assets[name].Type}
+			if isDataAsset(ha) {
+				ha.RustGISURL = rustgisDataURL(assetURL)
+			}
+			v.Assets = append(v.Assets, ha)
 		}
 		page.Items = append(page.Items, v)
 	}
