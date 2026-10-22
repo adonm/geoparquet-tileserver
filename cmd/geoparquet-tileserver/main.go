@@ -584,13 +584,23 @@ func main() {
 	router.Get("/collections/{collection}/items.html", s.itemsHTML)
 	router.Get("/collections/{collection}/stac", s.collectionSTAC)
 	router.Get("/collections/{collection}/assets/{asset}", s.collectionAsset)
+	router.Get("/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
+	router.Get("/collections/{collection}/assets/{asset}.pmtiles", s.collectionAsset)
+	router.Get("/collections/{collection}/pmtiles.pmtiles", s.groupPMTiles)
 	router.Get("/collections/{collection}/items/{item}", s.itemSTAC)
 	router.Get("/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
+	router.Get("/collections/{collection}/items/{item}/assets/{asset}.parquet", s.itemAsset)
+	router.Get("/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
 	router.Head("/stac", s.catalogSTAC)
 	router.Head("/collections/{collection}/stac", s.collectionSTAC)
 	router.Head("/collections/{collection}/assets/{asset}", s.collectionAsset)
+	router.Head("/collections/{collection}/assets/{asset}.parquet", s.collectionAsset)
+	router.Head("/collections/{collection}/assets/{asset}.pmtiles", s.collectionAsset)
+	router.Head("/collections/{collection}/pmtiles.pmtiles", s.groupPMTiles)
 	router.Head("/collections/{collection}/items/{item}", s.itemSTAC)
 	router.Head("/collections/{collection}/items/{item}/assets/{asset}", s.itemAsset)
+	router.Head("/collections/{collection}/items/{item}/assets/{asset}.parquet", s.itemAsset)
+	router.Head("/collections/{collection}/items/{item}/assets/{asset}.pmtiles", s.itemAsset)
 
 	humaCfg := huma.DefaultConfig("GeoParquet Tile Server", "0.1.0")
 	humaCfg.Info.Description = "A small STAC + GeoParquet vector tile server with browseable HTML views."
@@ -715,6 +725,15 @@ func (s *server) catalogSTAC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.serveAsset(w, r, st.base, "application/json")
+}
+
+func (s *server) groupPMTiles(w http.ResponseWriter, r *http.Request) {
+	_, entry, err := s.entry(r.URL.Query().Get("catalog"), chi.URLParam(r, "collection"))
+	if err != nil || entry.group == nil || entry.group.PMTiles == "" {
+		http.NotFound(w, r)
+		return
+	}
+	s.serveAsset(w, r, entry.group.PMTiles, "application/vnd.pmtiles")
 }
 
 func (s *server) collectionSTAC(w http.ResponseWriter, r *http.Request) {

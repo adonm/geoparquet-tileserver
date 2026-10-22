@@ -90,18 +90,23 @@ The UI uses Bootstrap 5.3.8 from jsDelivr. Bootstrap 6 has not been released;
 
 ### RustGIS links
 
-Catalog rows and collection pages include **Open tiles in RustGIS** links to
-the generated MVT layer, using RustGIS's `?tiles=` parameter:
+Catalog rows and collection pages include **Open tiles in RustGIS** links:
 
-```text
-https://web.rustgis.app/?tiles=<url-encoded /collections/{id}/tiles/{z}/{x}/{y}.mvt>
-```
+- Collections open the generated MVT layer with `?tiles=`:
 
-Parquet and PMTiles passthrough assets get **open data** links using `?data=`:
+  ```text
+  https://web.rustgis.app/?tiles=<url-encoded /collections/{id}/tiles/{z}/{x}/{y}.mvt>
+  ```
 
-```text
-https://web.rustgis.app/?data=<url-encoded passthrough asset URL>
-```
+- Virtual groups with a catalog-level Overture PMTiles link open that PMTiles
+  archive through this server with `?data=`:
+
+  ```text
+  https://web.rustgis.app/?data=<url-encoded /collections/{group}/pmtiles.pmtiles>
+  ```
+
+- Parquet and PMTiles passthrough assets get **open data** links using
+  `?data=` and filenames ending in `.parquet` or `.pmtiles`.
 
 The links open tile layers or files directly; they do not send RustGIS back to
 the STAC catalog. The server sends CORS headers and supports range requests so
@@ -119,6 +124,7 @@ GET /collections/{collection}/assets/{asset}
 GET /collections/{collection}/items
 GET /collections/{collection}/items/{item}
 GET /collections/{collection}/items/{item}/assets/{asset}
+GET /collections/{collection}/pmtiles.pmtiles
 ```
 
 Collection-level assets (common for Source Cooperative / fiboa datasets) and

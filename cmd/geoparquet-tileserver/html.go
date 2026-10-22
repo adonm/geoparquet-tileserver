@@ -37,6 +37,7 @@ type htmlCollection struct {
 	TileURL     string
 	ItemsURL    string
 	STACURL     string
+	PMTilesURL  string
 	RustGISURL  string
 	Assets      []htmlAsset
 	Children    []htmlLink
@@ -174,6 +175,7 @@ var collectionTemplate = template.Must(template.New("collection").Parse(`<!docty
     </div>
     <div class="d-flex flex-wrap gap-2">
       <a class="btn btn-sm btn-outline-primary" href="{{.Collection.TileJSONURL}}">TileJSON</a>
+      {{if .Collection.PMTilesURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.PMTilesURL}}">PMTiles passthrough</a>{{end}}
       {{if .Collection.ItemsURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.ItemsURL}}">Items / raw assets</a>{{end}}
       {{if .Collection.STACURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.STACURL}}">Raw STAC</a>{{end}}
       {{if .Collection.RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.Collection.RustGISURL}}" target="_blank" rel="noopener">Open tiles in RustGIS ↗</a>{{end}}
@@ -299,6 +301,18 @@ func isDataAsset(a htmlAsset) bool {
 	return strings.Contains(name, ".parquet") || strings.Contains(name, "parquet") || strings.HasSuffix(name, ".pmtiles") || strings.Contains(name, "pmtiles")
 }
 
+func dataAssetSuffix(a htmlAsset) string {
+	name := strings.ToLower(a.Name)
+	typ := strings.ToLower(a.Type)
+	switch {
+	case strings.Contains(typ, "pmtiles") || strings.Contains(name, "pmtiles"):
+		return ".pmtiles"
+	case strings.Contains(typ, "parquet") || strings.Contains(name, "parquet"):
+		return ".parquet"
+	}
+	return ""
+}
+
 func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) htmlCollection {
 	q := s.catalogQuery(catalog)
 	base := strings.TrimRight(s.cfg.BaseURL, "/")
@@ -324,6 +338,10 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 			a := e.collection.Assets[name]
 			assetURL := base + "/collections/" + id + "/assets/" + url.PathEscape(name) + q
 			ha := htmlAsset{Name: name, Type: a.Type, URL: assetURL}
+			if suffix := dataAssetSuffix(ha); suffix != "" {
+				assetURL = base + "/collections/" + id + "/assets/" + url.PathEscape(name) + suffix + q
+				ha.URL = assetURL
+			}
 			if isDataAsset(ha) {
 				ha.RustGISURL = rustgisDataURL(assetURL)
 			}
@@ -333,7 +351,11 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 	if e.group != nil && e.group.Base != "" {
 		hc.STACURL = base + "/collections/" + id + "/stac" + q
 	}
-	if hc.TileURL != "" {
+	if e.group != nil && e.group.PMTiles != "" {
+		hc.PMTilesURL = base + "/collections/" + id + "/pmtiles.pmtiles" + q
+		hc.RustGISURL = rustgisDataURL(hc.PMTilesURL)
+	}
+	if hc.TileURL != "" && hc.RustGISURL == "" {
 		hc.RustGISURL = rustgisTilesURL(hc.TileURL)
 	}
 	if e.group != nil {
@@ -436,6 +458,10 @@ func (s *server) itemsHTML(w http.ResponseWriter, r *http.Request) {
 		for _, name := range names {
 			assetURL := base + "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + q
 			ha := htmlAsset{Name: name, URL: assetURL, Type: it.Assets[name].Type}
+			if suffix := dataAssetSuffix(ha); suffix != "" {
+				assetURL = base + "/collections/" + id + "/items/" + url.PathEscape(it.ID) + "/assets/" + url.PathEscape(name) + suffix + q
+				ha.URL = assetURL
+			}
 			if isDataAsset(ha) {
 				ha.RustGISURL = rustgisDataURL(assetURL)
 			}

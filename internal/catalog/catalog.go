@@ -83,6 +83,7 @@ type Group struct {
 	Title       string
 	Description string
 	Base        string
+	PMTiles     string
 	Collections []*Collection
 	once        sync.Once
 	items       []Item
@@ -231,11 +232,19 @@ func Load(path string) (*Catalog, error) {
 				}
 			}
 			if len(direct) > 1 && n.id != "" {
+				var pmtiles string
+				for _, l := range head.Links {
+					if l.Rel == "pmtiles" {
+						pmtiles = Resolve(p, l.Href)
+						break
+					}
+				}
 				c.addGroup(&Group{
 					ID:          n.id,
 					Title:       firstNonEmpty(n.title, n.id),
 					Description: n.description,
 					Base:        n.base,
+					PMTiles:     pmtiles,
 					Collections: direct,
 				})
 			}
