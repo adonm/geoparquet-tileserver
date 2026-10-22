@@ -348,3 +348,22 @@ Warm z8 tile, local loopback, 200 concurrent requests:
 | Rust/tylertoo server (c=16) | 2.33 ms | 5.26 ms | 4,871 req/s |
 
 Results are environment-specific.
+
+## Persistent cache
+
+The tile cache and HTTP range cache can be persisted across restarts:
+
+```yaml
+cache_dir: "/cache"
+cache_disk_mb: 2048
+```
+
+Mount `/cache` as a Docker volume. The ko image runs as UID/GID `65532`:
+
+```bash
+mkdir -p cache
+sudo chown 65532:65532 cache
+```
+
+Tile responses expose `X-Cache: memory`, `X-Cache: disk`, or `X-Cache: miss`.
+The disk cache is bounded and evicts the least-recently-used entries first.
