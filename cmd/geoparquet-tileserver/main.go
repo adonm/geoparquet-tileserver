@@ -800,7 +800,7 @@ func (s *server) collectionStyle(w http.ResponseWriter, r *http.Request) {
 	span := math.Max(b.Max.X()-b.Min.X(), b.Max.Y()-b.Min.Y())
 	zoom := 4
 	if span > 0 {
-		zoom = int(math.Log2(360/span)) + 1
+		zoom = int(math.Log2(360/span)) + 2
 	}
 	if zoom < 0 {
 		zoom = 0
