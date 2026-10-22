@@ -3,12 +3,14 @@ package main
 import (
 	"fmt"
 	"html/template"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/paulmach/orb"
 )
 
 type htmlAsset struct {
@@ -295,8 +297,25 @@ func rustgisURL(param, value string) string {
 	return "https://web.rustgis.app/?" + param + "=" + url.QueryEscape(value)
 }
 
-func rustgisTilesURL(template string) string {
-	return rustgisURL("tiles", template)
+func rustgisTilesURL(template string, b orb.Bound) string {
+	u := rustgisURL("tiles", template)
+	if u == "" {
+		return ""
+	}
+	span := math.Max(b.Max.X()-b.Min.X(), b.Max.Y()-b.Min.Y())
+	z := 4
+	if span > 0 {
+		z = int(math.Log2(360/span)) + 1
+	}
+	if z < 0 {
+		z = 0
+	}
+	if z > 14 {
+		z = 14
+	}
+	lat := (b.Min.Y() + b.Max.Y()) / 2
+	lon := (b.Min.X() + b.Max.X()) / 2
+	return fmt.Sprintf("%s#%d/%.4f/%.4f", u, z, lat, lon)
 }
 
 func rustgisDataURL(assetURL string) string {
@@ -391,7 +410,7 @@ func (s *server) htmlCollection(_ *catalogState, e *layerEntry, catalog string) 
 		hc.RustGISURL = rustgisDataURL(hc.PMTilesURL)
 	}
 	if hc.TileURL != "" && hc.RustGISURL == "" {
-		hc.RustGISURL = rustgisTilesURL(hc.TileURL)
+		hc.RustGISURL = rustgisTilesURL(hc.TileURL, b)
 	}
 	if e.group != nil {
 		for _, child := range e.group.Collections {
