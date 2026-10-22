@@ -366,4 +366,6 @@ sudo chown 65532:65532 cache
 ```
 
 Tile responses expose `X-Cache: memory`, `X-Cache: disk`, or `X-Cache: miss`.
+Finite passthrough range requests up to 8 MiB are assembled from disk-cached
+1 MiB chunks; full downloads and open-ended ranges still stream directly.
 The disk cache is bounded and evicts the least-recently-used entries first.
