@@ -25,6 +25,7 @@ It is deliberately narrower than a general tile platform such as Tegola:
 - direct passthrough for STAC documents and all discovered assets
 - browseable Bootstrap HTML directory with links to collections, groups,
   items, tiles, TileJSON, raw STAC, and passthrough files
+- server-generated MapLibre styles for rendering arbitrary MVT layers in RustGIS
 - "Open in RustGIS" links for catalogs, collections, and virtual groups
 - CORS headers for browser-based clients such as RustGIS
 - STAC and Parquet assets over local paths, `file://`, and HTTP(S)
@@ -92,10 +93,12 @@ The UI uses Bootstrap 5.3.8 from jsDelivr. Bootstrap 6 has not been released;
 
 Catalog rows and collection pages include **Open tiles in RustGIS** links:
 
-- Collections open the generated MVT layer with `?tiles=`:
+- Collections open the generated MVT layer through a server-generated MapLibre
+  style, because RustGIS's generic `?tiles=` style does not know arbitrary MVT
+  layer names:
 
   ```text
-  https://web.rustgis.app/?tiles=<url-encoded /collections/{id}/tiles/{z}/{x}/{y}.mvt>
+  https://web.rustgis.app/?blank&style=<url-encoded /collections/{id}/style.json>
   ```
 
 - Virtual groups with a catalog-level Overture PMTiles link open that PMTiles
@@ -127,6 +130,7 @@ GET /collections/{collection}/items
 GET /collections/{collection}/items/{item}
 GET /collections/{collection}/items/{item}/assets/{asset}
 GET /collections/{collection}/pmtiles.pmtiles
+GET /collections/{collection}/style.json
 ```
 
 Collection-level assets (common for Source Cooperative / fiboa datasets) and
