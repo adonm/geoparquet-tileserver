@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/danielgtaylor/huma/v2 v2.37.0
+	github.com/exergy-dev/go-cql2 v0.0.0-20260625203801-b83740de7228
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/parquet-go/parquet-go v0.32.0
@@ -14,6 +15,7 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/exergy-dev/go-topology-suite v0.0.0-20260506035310-d06af64f89bc // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect

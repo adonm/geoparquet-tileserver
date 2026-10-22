@@ -4,11 +4,15 @@ package catalog
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/paulmach/orb"
 )
@@ -33,6 +37,7 @@ type Item struct {
 	Assets     map[string]Asset `json:"assets"`
 	Links      []Link           `json:"links"`
 	Properties map[string]any   `json:"properties"`
+	Base       string           `json:"-"`
 }
 
 type Catalog struct {
@@ -48,13 +53,22 @@ func Load(path string) (*Catalog, error) {
 			return nil
 		}
 		seen[p] = true
-		data, err := os.ReadFile(p)
+		data, err := Fetch(p)
 		if err != nil {
 			return err
 		}
 		var head struct {
-			Type  string `json:"type"`
-			Links []Link `json:"links"`
+			Type   string           `json:"type"`
+			ID     string           `json:"id"`
+			Links  []Link           `json:"links"`
+			BBox   []float64        `json:"bbox"`
+			Assets map[string]Asset `json:"assets"`
+			Extent struct {
+				Spatial struct {
+					BBox [][]float64 `json:"bbox"`
+				} `json:"spatial"`
+			} `json:"extent"`
+			Collection string `json:"collection"`
 		}
 		if err := json.Unmarshal(data, &head); err != nil {
 			return err
@@ -64,15 +78,25 @@ func Load(path string) (*Catalog, error) {
 			if err := json.Unmarshal(data, &it); err != nil {
 				return err
 			}
+			it.Base = p
 			items = append(items, it)
 			return nil
 		}
-		base := filepath.Dir(p)
+		// Collection-level GeoParquet assets (e.g. fiboa collections).
+		if len(head.Assets) > 0 {
+			it := Item{Type: "Feature", ID: head.ID, Collection: head.ID, Assets: head.Assets, Base: p}
+			if len(head.BBox) >= 4 {
+				it.BBox = head.BBox
+			} else if len(head.Extent.Spatial.BBox) > 0 {
+				it.BBox = head.Extent.Spatial.BBox[0]
+			}
+			items = append(items, it)
+		}
 		for _, l := range head.Links {
 			if l.Rel != "item" && l.Rel != "child" {
 				continue
 			}
-			hp := LocalPath(l.Href, base)
+			hp := Resolve(p, l.Href)
 			if hp == "" {
 				continue
 			}
@@ -82,14 +106,33 @@ func Load(path string) (*Catalog, error) {
 		}
 		return nil
 	}
-	if err := walk(LocalPath(path, "."), 0); err != nil {
+	if err := walk(Resolve(".", path), 0); err != nil {
 		return nil, err
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
 	return &Catalog{Items: items}, nil
 }
 
-func LocalPath(href, base string) string {
+func Fetch(path string) ([]byte, error) {
+	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
+		client := &http.Client{Timeout: 60 * time.Second}
+		resp, err := client.Get(path)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GET %s: %s", path, resp.Status)
+		}
+		return io.ReadAll(resp.Body)
+	}
+	return os.ReadFile(path)
+}
+
+func Resolve(base, href string) string {
+	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
+		return href
+	}
 	if strings.HasPrefix(href, "file://") {
 		u, err := url.Parse(href)
 		if err == nil {
@@ -100,10 +143,21 @@ func LocalPath(href, base string) string {
 	if strings.Contains(href, "://") {
 		return ""
 	}
+	if strings.HasPrefix(base, "http://") || strings.HasPrefix(base, "https://") {
+		b, err := url.Parse(base)
+		if err != nil {
+			return ""
+		}
+		r, err := url.Parse(href)
+		if err != nil {
+			return ""
+		}
+		return b.ResolveReference(r).String()
+	}
 	if filepath.IsAbs(href) {
 		return href
 	}
-	return filepath.Join(base, href)
+	return filepath.Join(filepath.Dir(base), href)
 }
 
 func (it Item) Bound() orb.Bound {
@@ -114,21 +168,22 @@ func (it Item) Bound() orb.Bound {
 }
 
 func (it Item) ParquetAsset() (string, bool) {
-	// Prefer explicit data assets over visual/overview assets.
+	var best string
 	for _, a := range it.Assets {
-		if contains(a.Roles, "overview") {
+		if contains(a.Roles, "overview") || strings.Contains(a.Href, "*") {
 			continue
 		}
 		if strings.Contains(a.Type, "parquet") || strings.HasSuffix(a.Href, ".parquet") {
-			return LocalPath(a.Href, "."), true
+			href := Resolve(it.Base, a.Href)
+			if href == "" {
+				continue
+			}
+			if best == "" || len(href) < len(best) {
+				best = href
+			}
 		}
 	}
-	for _, a := range it.Assets {
-		if strings.Contains(a.Type, "parquet") || strings.HasSuffix(a.Href, ".parquet") {
-			return LocalPath(a.Href, "."), true
-		}
-	}
-	return "", false
+	return best, best != ""
 }
 
 func (c *Catalog) Bounds() orb.Bound {

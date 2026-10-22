@@ -10,6 +10,10 @@ github.com/danielgtaylor/huma/v2 v2.37.0 h1:J1Uoi4YTbOA0G+4sTcz7mfPnEotNUgZ4pQAg
 github.com/danielgtaylor/huma/v2 v2.37.0/go.mod h1:95S04G/lExFRYlBkKaBaZm9lVmxRmqX9f2CgoOZ11AM=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/exergy-dev/go-cql2 v0.0.0-20260625203801-b83740de7228 h1:xJExPvrh+hVxWYl1ja9Dtf3DR65Xi/1WnCAel/kVgSc=
+github.com/exergy-dev/go-cql2 v0.0.0-20260625203801-b83740de7228/go.mod h1:Jc5NQuq1uMh5umQwkWScI96/7CZbXKYH4mRbMuiToHc=
+github.com/exergy-dev/go-topology-suite v0.0.0-20260506035310-d06af64f89bc h1:o2iD5rxTaGXdtNuizKJoRPbCvmpHC6KRfv39aQ6DXgs=
+github.com/exergy-dev/go-topology-suite v0.0.0-20260506035310-d06af64f89bc/go.mod h1:lLDAmaBcr7m5S0rVgGchtWNW1kwcqUrZ0BILlQHrpIE=
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
 github.com/fxamacker/cbor/v2 v2.9.0/go.mod h1:vM4b+DJCtHn+zz7h3FFp/hDAI9WNWCsZj23V5ytsSxQ=
 github.com/go-chi/chi/v5 v5.2.5 h1:Eg4myHZBjyvJmAFjFvWgrqDTXFyOzjj7YIm3L3mu6Ug=
@@ -93,3 +97,5 @@ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+
 gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
 gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
 gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
+pgregory.net/rapid v1.2.0 h1:keKAYRcjm+e1F0oAuU5F5+YPAWcyxNNRK2wud503Gnk=
+pgregory.net/rapid v1.2.0/go.mod h1:PY5XlDGj0+V1FCq0o192FdRhpKHGTRIWBgqjDBTrq04=

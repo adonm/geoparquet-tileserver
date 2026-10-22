@@ -1,9 +1,22 @@
+# Overture data access guide:
+# https://docs.overturemaps.org/getting-data/cloud-sources/
+#
+# The human docs above are not a STAC catalog. This is the machine-readable
+# Overture STAC. A release-specific collection is smaller to load:
+catalog: "https://stac.overturemaps.org/2026-10-21.0/divisions/division_area/collection.json"
+
+# Named catalogs can be selected per request with ?catalog=<name>.
+catalogs:
+  mappinginequality: "https://data.source.coop/cboettig/mappinginequality/stac-collection.json"
+
+# You can override the default catalog at startup:
+#   ./geoparquet-tileserver --config config.yaml --catalog https://...
 listen: "127.0.0.1:8080"
 base_url: "http://127.0.0.1:8080"
-catalog: "/tmp/opencode/tegola-gp/overview_item.json"
 cache_tiles: 4096
-preload: true
+preload: false
+
 layers:
-  - name: cells
+  - name: features
     min_zoom: 0
     max_zoom: 14

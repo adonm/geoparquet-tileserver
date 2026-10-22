@@ -4,9 +4,7 @@ package tiles
 import (
 	"context"
 	"fmt"
-	"sync"
 
-	"github.com/parquet-go/parquet-go"
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/clip"
 	"github.com/paulmach/orb/encoding/mvt"
@@ -15,6 +13,7 @@ import (
 	"github.com/paulmach/orb/maptile"
 
 	"github.com/adonm/geoparquet-tileserver/internal/catalog"
+	filt "github.com/adonm/geoparquet-tileserver/internal/filter"
 )
 
 type Options struct {
@@ -26,91 +25,50 @@ type Options struct {
 	Preload        bool
 }
 
-type Row struct {
-	Geometry []byte  `parquet:"geometry"`
-	BBox     BBox    `parquet:"bbox"`
-	Count    int64   `parquet:"count"`
-	SumValue float64 `parquet:"sum_value"`
-}
-
-type BBox struct {
-	Xmin float64 `parquet:"xmin"`
-	Ymin float64 `parquet:"ymin"`
-	Xmax float64 `parquet:"xmax"`
-	Ymax float64 `parquet:"ymax"`
-}
-
-type Feature struct {
-	Geom  orb.Geometry
-	Bound orb.Bound
-	Count int64
-	Sum   float64
-}
-
-type Partition struct {
-	Asset    string
-	Bound    orb.Bound
-	mu       sync.Mutex
-	loaded   bool
-	features []Feature
-}
-
-func (p *Partition) load() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.loaded {
-		return nil
-	}
-	rows, err := parquet.ReadFile[Row](p.Asset)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", p.Asset, err)
-	}
-	fs := make([]Feature, 0, len(rows))
-	for _, r := range rows {
-		g, err := wkb.Unmarshal(r.Geometry)
-		if err != nil {
-			continue
-		}
-		b := orb.Bound{Min: orb.Point{r.BBox.Xmin, r.BBox.Ymin}, Max: orb.Point{r.BBox.Xmax, r.BBox.Ymax}}
-		if b.IsZero() {
-			b = g.Bound()
-		}
-		fs = append(fs, Feature{Geom: g, Bound: b, Count: r.Count, Sum: r.SumValue})
-	}
-	p.features = fs
-	p.loaded = true
-	return nil
-}
-
 type Layer struct {
 	Name    string
 	MinZoom int
 	MaxZoom int
 	Bounds  orb.Bound
 
-	overview   *Overview
-	partitions []*Partition
+	geomCol    string
+	overview   *Dataset
+	partitions []*partitionRef
+}
+
+type partitionRef struct {
+	ds    *Dataset
+	bound orb.Bound
 }
 
 func New(opts Options, items []catalog.Item) (*Layer, error) {
-	l := &Layer{Name: opts.Name, MinZoom: opts.MinZoom, MaxZoom: opts.MaxZoom}
+	l := &Layer{Name: opts.Name, MinZoom: opts.MinZoom, MaxZoom: opts.MaxZoom, geomCol: opts.GeometryColumn}
 	for _, it := range items {
 		asset, ok := it.ParquetAsset()
 		if !ok {
 			continue
 		}
-		if ov, err := openOverview(asset); err == nil && ov != nil {
-			l.overview = ov
+		ds, err := openDataset(asset, opts.GeometryColumn)
+		if err != nil {
+			return nil, fmt.Errorf("layer %q: %w", opts.Name, err)
+		}
+		if ds.overview {
+			l.overview = ds
 			if opts.Preload {
-				for i := range ov.levels {
-					if _, err := ov.BoundsForLevel(i); err != nil {
+				for i := range ds.levels {
+					if _, err := ds.BoundsForLevel(i); err != nil {
 						return nil, fmt.Errorf("preload %s: %w", opts.Name, err)
 					}
 				}
 			}
 			break
 		}
-		l.partitions = append(l.partitions, &Partition{Asset: asset, Bound: it.Bound()})
+		l.partitions = append(l.partitions, &partitionRef{ds: ds, bound: it.Bound()})
+		if opts.Preload {
+			if _, err := ds.BoundsForLevel(0); err != nil {
+				return nil, fmt.Errorf("preload %s: %w", opts.Name, err)
+			}
+		}
 	}
 	if l.overview == nil && len(l.partitions) == 0 {
 		return nil, fmt.Errorf("layer %q: no GeoParquet assets", opts.Name)
@@ -119,15 +77,51 @@ func New(opts Options, items []catalog.Item) (*Layer, error) {
 	return l, nil
 }
 
-func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int) ([]byte, error) {
+func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int, f *filt.Filter) ([]byte, error) {
 	tile := maptile.New(x, y, maptile.Zoom(z))
 	tb := tile.Bound()
 	fc := &geojson.FeatureCollection{}
 	var min int64
-	filter := false
+	filterMin := false
 	if minCount != nil {
 		min = int64(*minCount)
-		filter = true
+		filterMin = true
+	}
+
+	add := func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) error {
+		if filterMin {
+			if c, ok := propInt(props, "count"); ok && c < min {
+				return nil
+			}
+		}
+		if f != nil {
+			ok, err := f.Match(props)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+		}
+		g, err := wkb.Unmarshal(geom)
+		if err != nil {
+			return nil
+		}
+		if !hasBBox {
+			bound = g.Bound()
+		}
+		if !intersects(bound, tb) {
+			return nil
+		}
+		g = clip.Geometry(tb, g)
+		if g == nil {
+			return nil
+		}
+		fc.Features = append(fc.Features, &geojson.Feature{
+			Geometry:   g,
+			Properties: geojson.Properties(props),
+		})
+		return nil
 	}
 
 	if l.overview != nil {
@@ -143,57 +137,45 @@ func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int)
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			err := l.overview.ScanRowGroup(rgb.Index, func(r Row) {
-				if filter && r.Count < min {
-					return
+			var addErr error
+			if err := l.overview.ScanRowGroup(rgb.Index, func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) {
+				if addErr == nil {
+					addErr = add(geom, bound, hasBBox, props)
 				}
-				b := orb.Bound{Min: orb.Point{r.BBox.Xmin, r.BBox.Ymin}, Max: orb.Point{r.BBox.Xmax, r.BBox.Ymax}}
-				if !intersects(b, tb) {
-					return
-				}
-				g, err := wkb.Unmarshal(r.Geometry)
-				if err != nil {
-					return
-				}
-				g = clip.Geometry(tb, g)
-				if g == nil {
-					return
-				}
-				fc.Features = append(fc.Features, &geojson.Feature{
-					Geometry:   g,
-					Properties: geojson.Properties{"count": r.Count, "sum_value": r.SumValue},
-				})
-			})
-			if err != nil {
+			}); err != nil {
 				return nil, err
+			}
+			if addErr != nil {
+				return nil, addErr
 			}
 		}
 	} else {
 		for _, p := range l.partitions {
-			if !intersects(p.Bound, tb) {
+			if !intersects(p.bound, tb) {
 				continue
 			}
-			if err := ctx.Err(); err != nil {
+			bounds, err := p.ds.BoundsForLevel(0)
+			if err != nil {
 				return nil, err
 			}
-			if err := p.load(); err != nil {
-				return nil, err
-			}
-			for _, f := range p.features {
-				if filter && f.Count < min {
+			for _, rgb := range bounds {
+				if !intersects(rgb.Bound, tb) {
 					continue
 				}
-				if !intersects(f.Bound, tb) {
-					continue
+				if err := ctx.Err(); err != nil {
+					return nil, err
 				}
-				g := clip.Geometry(tb, orb.Clone(f.Geom))
-				if g == nil {
-					continue
+				var addErr error
+				if err := p.ds.ScanRowGroup(rgb.Index, func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) {
+					if addErr == nil {
+						addErr = add(geom, bound, hasBBox, props)
+					}
+				}); err != nil {
+					return nil, err
 				}
-				fc.Features = append(fc.Features, &geojson.Feature{
-					Geometry:   g,
-					Properties: geojson.Properties{"count": f.Count, "sum_value": f.Sum},
-				})
+				if addErr != nil {
+					return nil, addErr
+				}
 			}
 		}
 	}
@@ -202,6 +184,22 @@ func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int)
 	ls.ProjectToTile(tile)
 	ls.Clip(mvt.MapboxGLDefaultExtentBound)
 	return mvt.Marshal(ls)
+}
+
+func propInt(props map[string]any, name string) (int64, bool) {
+	v, ok := props[name]
+	if !ok {
+		return 0, false
+	}
+	switch x := v.(type) {
+	case int:
+		return int64(x), true
+	case int64:
+		return x, true
+	case float64:
+		return int64(x), true
+	}
+	return 0, false
 }
 
 func intersects(a, b orb.Bound) bool {

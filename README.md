@@ -7,121 +7,181 @@ and [`orb`](https://github.com/paulmach/orb).
 
 It is deliberately narrower than a general tile platform such as Tegola:
 
-- one STAC collection per layer
-- GeoParquet only
+- STAC + GeoParquet only
 - WGS84 / OGC:CRS84
 - MVT output
+- local or HTTP(S) assets
 - optional multi-resolution overviews via `geo:overviews`
+- OGC API Features-style CQL2 filtering
 - no PostGIS, GeoPackage, HANA, style rendering, or map composition
 
 ## Features
 
 - STAC Collection / Catalog / Item traversal (`item` and `child` links)
-- `file://` and local relative/absolute asset paths
-- automatic overview detection via the `geo:overviews` footer key
-- zoom-to-level selection and Parquet row-group bbox pruning
-- lazy loading for spatial partition catalogs
-- optional startup preload of overview row-group bounds
+- STAC and Parquet assets over local paths, `file://`, and HTTP(S)
+- HTTP range requests with a chunked read cache
+- automatic geometry and bbox-covering column detection
+- overview level selection via `geo:overviews` and `zoom` / `gsd`
+- Parquet row-group bbox pruning
 - WKB decode with `orb/encoding/wkb`
 - tile clipping with `orb/clip`
 - MVT encoding with `orb/encoding/mvt`
-- byte/LRU tile cache plus request coalescing
-- typed `min_count` URL filter
-- TileJSON, collections, health, OpenAPI docs from Huma
+- all scalar Parquet properties become MVT properties
+- Basic CQL2 text filtering via `?filter=...`
+- `?filter-lang=cql2-text` or `cql2-json`
+- LRU tile cache plus request coalescing
+- named catalogs selectable with `?catalog=<name>`
+- TileJSON, collections, health, OpenAPI docs
+
+## Default source: Overture
+
+Overture publishes GeoParquet through a STAC catalog:
+
+- Human guide:
+  <https://docs.overturemaps.org/getting-data/cloud-sources/>
+- Machine-readable STAC:
+  <https://stac.overturemaps.org/catalog.json>
+
+The default `config.example.yaml` points at a release-specific Overture
+collection. Overture files are global and large, so use a tile bbox to read
+only the relevant row groups. For a smaller first test, use the
+`mappinginequality` catalog alias.
 
 ## Quick start
 
 ```bash
 go build ./cmd/geoparquet-tileserver
 
-cat > config.yaml <<'YAML'
-listen: "127.0.0.1:8080"
-catalog: "/path/to/collection.json"
-cache_tiles: 4096
-preload: true
-layers:
-  - name: cells
-    min_zoom: 0
-    max_zoom: 14
-YAML
-
+cp config.example.yaml config.yaml
+# edit the catalog / layer as needed
 ./geoparquet-tileserver --config config.yaml
+```
+
+Override the catalog at startup:
+
+```bash
+./geoparquet-tileserver --config config.yaml \
+  --catalog https://stac.overturemaps.org/catalog.json
 ```
 
 Endpoints:
 
 ```text
-GET /collections
-GET /collections/{collection}/tilejson.json
-GET /collections/{collection}/tiles/{z}/{x}/{y}
-GET /collections/{collection}/tiles/{z}/{x}/{y}.mvt?min_count=500
+GET /collections?catalog=<name>
+GET /collections/{collection}/tilejson.json?catalog=<name>
+GET /collections/{collection}/tiles/{z}/{x}/{y}.mvt?catalog=<name>
+GET /collections/{collection}/tiles/{z}/{x}/{y}.mvt?filter=...
 GET /healthz
 GET /docs
 GET /openapi.json
 ```
 
+`catalog` is optional; omitting it uses the default catalog. The value can be
+a configured alias (`mappinginequality`) or that catalog's configured URL.
+Catalogs are loaded once at startup; restart with `--catalog` to point at a
+different source. Arbitrary per-request catalog URLs are intentionally not
+loaded, to avoid SSRF and unbounded startup work.
+
+## Public datasets to test against
+
+### Overture Maps
+
+- Guide: <https://docs.overturemaps.org/getting-data/cloud-sources/>
+- STAC root: <https://stac.overturemaps.org/catalog.json>
+- Latest release: `https://stac.overturemaps.org/<release>/catalog.json`
+- Example collection:
+  `https://stac.overturemaps.org/2026-10-21.0/divisions/division_area/collection.json`
+
+Assets are HTTPS GeoParquet on S3/Azure; the server reads them with range
+requests and row-group pruning.
+
+### Source Cooperative / GLEN
+
+Small, public, WGS84 GeoParquet STAC collections:
+
+- Mapping Inequality:
+  `https://data.source.coop/cboettig/mappinginequality/stac-collection.json`
+- California Protected Areas:
+  `https://data.source.coop/cboettig/cpad/stac-collection.json`
+- CalEnviroScreen:
+  `https://data.source.coop/cboettig/calenviroscreen/stac-collection.json`
+- GLEN root:
+  `https://data.source.coop/cboettig/glen/catalog.json`
+
+Example alias in `config.example.yaml`:
+
+```yaml
+catalogs:
+  mappinginequality: "https://data.source.coop/cboettig/mappinginequality/stac-collection.json"
+```
+
+Then:
+
+```text
+/collections?catalog=mappinginequality
+/collections/features/tiles/8/66/102.mvt?catalog=mappinginequality
+```
+
+Mapping Inequality is ~2.8 MB and WGS84, so it is a good first HTTP test.
+Fiboa collections such as
+`https://data.source.coop/fiboa/data/bg/stac/collection.json` are currently
+projected (EPSG:3857), which this server does not reproject.
+
+## Filtering
+
+The server implements OGC API Features-style CQL2 filtering.
+
+```text
+?filter=category='Best'
+?filter=state='AL' AND metrics:area > 1000
+?filter=crop:name IN ('Wheat','Corn')
+?filter=name LIKE 'A%'
+?filter=category IS NOT NULL
+```
+
+`filter-lang` can be `cql2-text` (default) or `cql2-json`.
+
+Supported subset:
+
+- `AND`, `OR`, `NOT`
+- `=`, `<>`, `<`, `<=`, `>`, `>=`
+- `LIKE`, `BETWEEN`, `IN`, `IS [NOT] NULL`
+- numeric and string comparisons
+
+Not yet supported: spatial and temporal CQL2 operators, arithmetic, functions.
+
+The cache key includes the catalog, collection, zoom/x/y, and the normalized
+filter query.
+
 ## STAC / GeoParquet contract
-
-The catalog may be a STAC Collection, Catalog, or Item. Item assets must point
-at GeoParquet files (`type: application/vnd.apache.parquet` or `.parquet`).
-
-Two layouts are supported.
-
-### Overviews (recommended)
-
-One or more items with a GeoParquet asset containing a `geo:overviews` footer
-key. The server selects the level by zoom, prunes row groups using the bbox
-covering, and reads only surviving row groups.
-
-This is the lowest-latency layout for z0–z8 and beyond.
-
-### Spatial partitions
-
-Items with ordinary GeoParquet assets and accurate bboxes. The server selects
-intersecting items and lazy-loads each partition.
-
-Partition-only catalogs should not be used for low zoom without pre-aggregated
-levels: every visible full-resolution feature would be encoded into the tile.
-
-## Input requirements
 
 - WGS84 / OGC:CRS84
 - geometry at the root, WKB or Parquet native `GEOMETRY`
-- bbox covering column (`xmin`, `ymin`, `xmax`, `ymax`)
-- Hilbert/spatial sort inside row groups
+- bbox covering column (`bbox` / `geom_bbox` / GeoParquet covering)
+- spatial sort inside row groups
 - overviews generated with `geo:overviews` metadata
 
 `gpio publish stac` can generate the catalog. `gpio process overview` or
 `tylertoo overview` can generate optimized overview GeoParquet.
 
-## Filtering
-
-`min_count` is a typed map/query parameter:
-
-```text
-/tiles/8/41/135.mvt?min_count=500
-```
-
-The cache key includes the filter value. Additional filters can be added in
-`internal/tiles` and the Huma input struct.
-
 ## Performance notes
 
-- Warm overview tiles are in the low-millisecond range on a local dataset.
-- The expensive part is geometry decoding, clipping, and MVT encoding.
-- Cache encoded tiles and preload overview bounds.
-- For high traffic, use a byte-weighted cache, ETags, and a CDN.
-- For selective attribute filters, add row-group statistics pushdown or
-  pre-materialized filtered levels.
+- Warm tiles are sub-millisecond with the in-process tile cache.
+- Remote HTTP reads are chunked (1 MiB) and cached in a 64 MiB read cache.
+- Prefer overview GeoParquet for low zoom.
+- For selective filters, row-group statistics pushdown is still future work.
+- Use a shared cache/CDN for multi-process deployments.
 
 ## Limitations
 
-- Local files only; no S3/HTTP asset support yet.
-- WGS84 only.
-- Fixed MVT properties (`count`, `sum_value`) and one `min_count` filter.
-- Prototype; no test suite yet.
-- STAC bboxes must be accurate. Antimeridian-crossing geometries can produce
-  world-spanning item bboxes and defeat partition pruning.
+- WGS84 only; no reprojection.
+- Basic CQL2 only.
+- No S3/GCS native credentials; HTTPS assets only.
+- Prototype; unit tests currently cover the CQL2 filter subset only.
+- The first Overture tile can be slow: the server scans bbox-column pages to
+  build row-group bounds. Reuse the server process / tile cache for warm tiles.
+- STAC item bboxes must be accurate. Antimeridian-crossing geometries can
+  produce world-spanning bboxes and defeat partition pruning.
 
 ## License
 
@@ -139,5 +199,4 @@ Warm z8 tile, local loopback, 200 concurrent requests:
 | Tegola overview (c=16) | 6.75 ms | 17.3 ms | 1,668 req/s |
 | Rust/tylertoo server (c=16) | 2.33 ms | 5.26 ms | 4,871 req/s |
 
-Cold tile generation is ~80 ms for this z8 tile after preload; warm cache hits are
-sub-millisecond. Results are environment-specific.
+Results are environment-specific.
