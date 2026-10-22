@@ -8,13 +8,15 @@ import (
 )
 
 type Config struct {
-	Listen     string            `yaml:"listen"`
-	BaseURL    string            `yaml:"base_url"`
-	Catalog    string            `yaml:"catalog"`
-	CacheTiles int               `yaml:"cache_tiles"`
-	Preload    bool              `yaml:"preload"`
-	Layers     []Layer           `yaml:"layers"`
-	Catalogs   map[string]string `yaml:"catalogs"`
+	Listen      string            `yaml:"listen"`
+	BaseURL     string            `yaml:"base_url"`
+	Catalog     string            `yaml:"catalog"`
+	CacheTiles  int               `yaml:"cache_tiles"`
+	CacheDir    string            `yaml:"cache_dir"`
+	CacheDiskMB int               `yaml:"cache_disk_mb"`
+	Preload     bool              `yaml:"preload"`
+	Layers      []Layer           `yaml:"layers"`
+	Catalogs    map[string]string `yaml:"catalogs"`
 }
 
 type Layer struct {
@@ -39,6 +41,9 @@ func Load(path string) (*Config, error) {
 	}
 	if c.CacheTiles == 0 {
 		c.CacheTiles = 4096
+	}
+	if c.CacheDir != "" && c.CacheDiskMB == 0 {
+		c.CacheDiskMB = 2048
 	}
 	if c.Catalog == "" {
 		c.Catalog = "https://stac.overturemaps.org/catalog.json"

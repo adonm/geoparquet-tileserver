@@ -10,6 +10,10 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
+
+	diskcache "github.com/adonm/geoparquet-tileserver/internal/cache"
 )
 
 type source struct {
@@ -78,9 +82,17 @@ func remoteSize(client *http.Client, url string) (int64, error) {
 const httpChunkSize = 1 << 20
 const httpCacheMax = 64 << 20
 
+var diskCache *diskcache.Disk
+
+// ConfigureDiskCache enables persistent range caching for all HTTP sources.
+func ConfigureDiskCache(d *diskcache.Disk) {
+	diskCache = d
+}
+
 type httpReaderAt struct {
 	url    string
 	client *http.Client
+	flight singleflight.Group
 
 	mu     sync.Mutex
 	chunks map[int64][]byte
@@ -110,25 +122,52 @@ func (h *httpReaderAt) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (h *httpReaderAt) chunk(start int64) ([]byte, error) {
-	h.mu.Lock()
-	if b, ok := h.chunks[start]; ok {
-		h.mu.Unlock()
+	if b, ok := h.memChunk(start); ok {
 		return b, nil
 	}
-	h.mu.Unlock()
-	b, err := h.fetch(start, httpChunkSize)
+	v, err, _ := h.flight.Do(strconv.FormatInt(start, 10), func() (any, error) {
+		if b, ok := h.memChunk(start); ok {
+			return b, nil
+		}
+		key := h.url + "|" + strconv.FormatInt(start, 10)
+		if diskCache != nil {
+			if b, ok := diskCache.Get("ranges", key); ok {
+				h.storeChunk(start, b)
+				return b, nil
+			}
+		}
+		b, err := h.fetch(start, httpChunkSize)
+		if err != nil {
+			return nil, err
+		}
+		if diskCache != nil {
+			diskCache.Put("ranges", key, b)
+		}
+		h.storeChunk(start, b)
+		return b, nil
+	})
 	if err != nil {
 		return nil, err
 	}
+	return v.([]byte), nil
+}
+
+func (h *httpReaderAt) memChunk(start int64) ([]byte, bool) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	b, ok := h.chunks[start]
+	return b, ok
+}
+
+func (h *httpReaderAt) storeChunk(start int64, b []byte) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.chunks[start] = b
 	h.bytes += len(b)
 	if h.bytes > httpCacheMax {
 		h.chunks = map[int64][]byte{start: b}
 		h.bytes = len(b)
 	}
-	h.mu.Unlock()
-	return b, nil
 }
 
 func (h *httpReaderAt) fetch(off int64, length int64) ([]byte, error) {

@@ -27,6 +27,7 @@ import (
 	"github.com/paulmach/orb"
 	"golang.org/x/sync/singleflight"
 
+	diskcache "github.com/adonm/geoparquet-tileserver/internal/cache"
 	"github.com/adonm/geoparquet-tileserver/internal/catalog"
 	"github.com/adonm/geoparquet-tileserver/internal/config"
 	filt "github.com/adonm/geoparquet-tileserver/internal/filter"
@@ -95,6 +96,7 @@ type server struct {
 	states     map[string]*catalogState
 	catalogURL map[string]string
 	cache      *lru.Cache[string, []byte]
+	disk       *diskcache.Disk
 	group      singleflight.Group
 }
 
@@ -144,6 +146,7 @@ type TileInput struct {
 type TileOutput struct {
 	ContentType  string `header:"Content-Type"`
 	CacheControl string `header:"Cache-Control"`
+	XCache       string `header:"X-Cache"`
 	Body         []byte
 }
 
@@ -265,8 +268,20 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 		return &TileOutput{
 			ContentType:  "application/vnd.mapbox-vector-tile",
 			CacheControl: "public, max-age=3600",
+			XCache:       "memory",
 			Body:         b,
 		}, nil
+	}
+	if s.disk != nil {
+		if b, ok := s.disk.Get("tiles", key); ok {
+			s.cache.Add(key, b)
+			return &TileOutput{
+				ContentType:  "application/vnd.mapbox-vector-tile",
+				CacheControl: "public, max-age=3600",
+				XCache:       "disk",
+				Body:         b,
+			}, nil
+		}
 	}
 	v, err, _ := s.group.Do(key, func() (any, error) {
 		layer, err := entry.get()
@@ -280,9 +295,13 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 	}
 	b := v.([]byte)
 	s.cache.Add(key, b)
+	if s.disk != nil {
+		s.disk.Put("tiles", key, b)
+	}
 	return &TileOutput{
 		ContentType:  "application/vnd.mapbox-vector-tile",
 		CacheControl: "public, max-age=3600",
+		XCache:       "miss",
 		Body:         b,
 	}, nil
 }
@@ -491,7 +510,13 @@ func main() {
 		cfg.Catalog = catalogOverride
 	}
 
-	s := &server{cfg: cfg, states: map[string]*catalogState{}, catalogURL: map[string]string{}}
+	disk, err := diskcache.Open(cfg.CacheDir, cfg.CacheDiskMB)
+	if err != nil {
+		slog.Error("disk cache", "dir", cfg.CacheDir, "err", err)
+		os.Exit(1)
+	}
+	tiles.ConfigureDiskCache(disk)
+	s := &server{cfg: cfg, states: map[string]*catalogState{}, catalogURL: map[string]string{}, disk: disk}
 	build := func(name, catalogURL string) error {
 		cat, err := catalog.Load(catalogURL)
 		if err != nil {

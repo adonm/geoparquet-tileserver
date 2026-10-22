@@ -14,6 +14,9 @@ catalogs:
 listen: "127.0.0.1:8080"
 base_url: "http://127.0.0.1:8080"
 cache_tiles: 4096
+# persistent HTTP-range and tile cache; mount this directory in Docker
+# cache_dir: "/cache"
+# cache_disk_mb: 2048
 preload: false
 
 # Layers are normally generated from the STAC collections automatically.
