@@ -108,9 +108,11 @@ Catalog rows and collection pages include **Open tiles in RustGIS** links:
 - Parquet and PMTiles passthrough assets get **open data** links using
   `?data=` and filenames ending in `.parquet` or `.pmtiles`.
 
-The links open tile layers or files directly; they do not send RustGIS back to
-the STAC catalog. The server sends CORS headers and supports range requests so
-RustGIS can read the data.
+Collection pages and directory rows with a collection-level Parquet asset
+also show a green **Open Parquet in RustGIS** link. Item pages expose links for
+each item-level Parquet/PMTiles asset. The links open tile layers or files
+directly; they do not send RustGIS back to the STAC catalog. The server sends
+CORS headers and supports range requests so RustGIS can read the data.
 
 ## Passthrough routes
 
