@@ -131,23 +131,35 @@ func (s *server) catalogNames() []string {
 }
 
 type TileInput struct {
-	Collection string `path:"collection" doc:"Collection / layer id"`
-	Z          uint8  `path:"z" doc:"Zoom level"`
-	X          uint32 `path:"x" doc:"Tile column"`
-	Y          string `path:"y" doc:"Tile row, optionally with .mvt suffix"`
-	MinCount   int    `query:"min_count" default:"0" doc:"Only include features with count >= this value"`
-	Filter     string `query:"filter" doc:"OGC API Features CQL2 filter expression"`
-	FilterLang string `query:"filter-lang" default:"cql2-text" doc:"Filter language"`
-	Host       string `header:"Host"`
-	Proto      string `header:"X-Forwarded-Proto"`
-	Catalog    string `query:"catalog" doc:"Named catalog alias from config"`
+	Collection  string `path:"collection" doc:"Collection / layer id"`
+	Z           uint8  `path:"z" doc:"Zoom level"`
+	X           uint32 `path:"x" doc:"Tile column"`
+	Y           string `path:"y" doc:"Tile row, optionally with .mvt suffix"`
+	MinCount    int    `query:"min_count" default:"0" doc:"Only include features with count >= this value"`
+	Filter      string `query:"filter" doc:"OGC API Features CQL2 filter expression"`
+	FilterLang  string `query:"filter-lang" default:"cql2-text" doc:"Filter language"`
+	Host        string `header:"Host"`
+	Proto       string `header:"X-Forwarded-Proto"`
+	Catalog     string `query:"catalog" doc:"Named catalog alias from config"`
+	DebugTiming string `header:"X-Debug-Timing" doc:"Return render phase timings in response headers"`
 }
 
 type TileOutput struct {
-	ContentType  string `header:"Content-Type"`
-	CacheControl string `header:"Cache-Control"`
-	XCache       string `header:"X-Cache"`
-	Body         []byte
+	ContentType   string `header:"Content-Type"`
+	CacheControl  string `header:"Cache-Control"`
+	XCache        string `header:"X-Cache"`
+	XQueryMS      string `header:"X-Query-Ms"`
+	XOpenMS       string `header:"X-Open-Ms"`
+	XBoundsMS     string `header:"X-Bounds-Ms"`
+	XScanMS       string `header:"X-Scan-Ms"`
+	XEncodeMS     string `header:"X-Encode-Ms"`
+	XFeatureCount string `header:"X-Features"`
+	Body          []byte
+}
+
+type renderResult struct {
+	body  []byte
+	stats tiles.RenderStats
 }
 
 type TileJSONOutput struct {
@@ -264,53 +276,78 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 		}
 	}
 	key := fmt.Sprintf("%s/%s/%d/%d/%d/%d/%s/%s", in.Catalog, in.Collection, in.Z, in.X, y, minVal, in.FilterLang, in.Filter)
-	if b, ok := s.cache.Get(key); ok {
-		return &TileOutput{
-			ContentType:  "application/vnd.mapbox-vector-tile",
-			CacheControl: "public, max-age=3600",
-			XCache:       "memory",
-			Body:         b,
-		}, nil
-	}
-	if s.disk != nil {
-		if b, ok := s.disk.Get("tiles", key); ok {
-			s.cache.Add(key, b)
+	debug := in.DebugTiming != ""
+	if !debug {
+		if b, ok := s.cache.Get(key); ok {
 			return &TileOutput{
 				ContentType:  "application/vnd.mapbox-vector-tile",
 				CacheControl: "public, max-age=3600",
-				XCache:       "disk",
+				XCache:       "memory",
 				Body:         b,
 			}, nil
 		}
+		if s.disk != nil {
+			if b, ok := s.disk.Get("tiles", key); ok {
+				s.cache.Add(key, b)
+				return &TileOutput{
+					ContentType:  "application/vnd.mapbox-vector-tile",
+					CacheControl: "public, max-age=3600",
+					XCache:       "disk",
+					Body:         b,
+				}, nil
+			}
+		}
+	}
+	if debug {
+		key += "/debug"
 	}
 	v, err, _ := s.group.Do(key, func() (any, error) {
 		layer, err := entry.get()
 		if err != nil {
 			return nil, err
 		}
-		return layer.Render(ctx, in.Z, in.X, uint32(y), minPtr, flt)
+		if debug {
+			b, st, err := layer.RenderDetailed(ctx, in.Z, in.X, uint32(y), minPtr, flt)
+			return renderResult{body: b, stats: st}, err
+		}
+		b, err := layer.Render(ctx, in.Z, in.X, uint32(y), minPtr, flt)
+		return renderResult{body: b}, err
 	})
 	if err != nil {
 		return nil, huma.Error500InternalServerError(err.Error())
 	}
-	b := v.([]byte)
-	s.cache.Add(key, b)
-	if s.disk != nil {
-		s.disk.Put("tiles", key, b)
+	res := v.(renderResult)
+	b := res.body
+	if !debug {
+		s.cache.Add(key, b)
+		if s.disk != nil {
+			s.disk.Put("tiles", key, b)
+		}
 	}
-	return &TileOutput{
+	out := &TileOutput{
 		ContentType:  "application/vnd.mapbox-vector-tile",
 		CacheControl: "public, max-age=3600",
 		XCache:       "miss",
 		Body:         b,
-	}, nil
+	}
+	if debug {
+		st := res.stats
+		out.XQueryMS = strconv.FormatFloat(st.QueryMS(), 'f', 3, 64)
+		out.XOpenMS = strconv.FormatFloat(st.OpenMS, 'f', 3, 64)
+		out.XBoundsMS = strconv.FormatFloat(st.BoundsMS, 'f', 3, 64)
+		out.XScanMS = strconv.FormatFloat(st.ScanMS, 'f', 3, 64)
+		out.XEncodeMS = strconv.FormatFloat(st.EncodeMS, 'f', 3, 64)
+		out.XFeatureCount = strconv.Itoa(st.Features)
+	}
+	return out, nil
 }
 
 func (s *server) tileJSON(ctx context.Context, in *struct {
-	Collection string `path:"collection"`
-	Host       string `header:"Host"`
-	Proto      string `header:"X-Forwarded-Proto"`
-	Catalog    string `query:"catalog" doc:"Named catalog alias from config"`
+	Collection  string `path:"collection"`
+	Host        string `header:"Host"`
+	Proto       string `header:"X-Forwarded-Proto"`
+	Catalog     string `query:"catalog" doc:"Named catalog alias from config"`
+	DebugTiming string `header:"X-Debug-Timing" doc:"Return render phase timings in response headers"`
 }) (*TileJSONOutput, error) {
 	_, entry, err := s.entry(in.Catalog, in.Collection)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/paulmach/orb"
 	"github.com/paulmach/orb/clip"
@@ -80,7 +81,23 @@ func New(opts Options, items []catalog.Item) (*Layer, error) {
 	return l, nil
 }
 
+type RenderStats struct {
+	OpenMS   float64
+	BoundsMS float64
+	ScanMS   float64
+	EncodeMS float64
+	Features int
+}
+
+func (s RenderStats) QueryMS() float64 { return s.OpenMS + s.BoundsMS + s.ScanMS }
+
 func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int, f *filt.Filter) ([]byte, error) {
+	b, _, err := l.RenderDetailed(ctx, z, x, y, minCount, f)
+	return b, err
+}
+
+func (l *Layer) RenderDetailed(ctx context.Context, z uint8, x, y uint32, minCount *int, f *filt.Filter) ([]byte, RenderStats, error) {
+	var stats RenderStats
 	tile := maptile.New(x, y, maptile.Zoom(z))
 	tb := tile.Bound()
 	fc := &geojson.FeatureCollection{}
@@ -131,43 +148,56 @@ func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int,
 		if !intersects(p.bound, tb) {
 			continue
 		}
+		t0 := time.Now()
 		ds, err := p.get()
+		stats.OpenMS += time.Since(t0).Seconds() * 1000
 		if err != nil {
-			return nil, err
+			return nil, stats, err
 		}
 		level := 0
 		if ds.overview {
 			level = ds.LevelForZoom(int(z))
 		}
+		t0 = time.Now()
 		bounds, err := ds.BoundsForLevel(level)
+		stats.BoundsMS += time.Since(t0).Seconds() * 1000
 		if err != nil {
-			return nil, err
+			return nil, stats, err
 		}
 		for _, rgb := range bounds {
 			if !intersects(rgb.Bound, tb) {
 				continue
 			}
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return nil, stats, err
 			}
+			t0 = time.Now()
 			var addErr error
 			if err := ds.ScanRowGroup(rgb.Index, func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) {
 				if addErr == nil {
 					addErr = add(geom, bound, hasBBox, props)
 				}
 			}); err != nil {
-				return nil, err
+				return nil, stats, err
 			}
+			stats.ScanMS += time.Since(t0).Seconds() * 1000
 			if addErr != nil {
-				return nil, addErr
+				return nil, stats, addErr
 			}
 		}
 	}
+	stats.Features = len(fc.Features)
 
+	t0 := time.Now()
 	ls := mvt.NewLayers(map[string]*geojson.FeatureCollection{l.Name: fc})
 	ls.ProjectToTile(tile)
 	ls.Clip(mvt.MapboxGLDefaultExtentBound)
-	return mvt.Marshal(ls)
+	b, err := mvt.Marshal(ls)
+	stats.EncodeMS = time.Since(t0).Seconds() * 1000
+	if err != nil {
+		return nil, stats, err
+	}
+	return b, stats, nil
 }
 
 func propInt(props map[string]any, name string) (int64, bool) {

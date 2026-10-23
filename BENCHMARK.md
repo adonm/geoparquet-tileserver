@@ -45,6 +45,37 @@ dataset opening plus remote range reads and bbox-page scans, not MVT encoding
 alone. Disk-caching the range chunks and tile bytes turns a restart into the
 same order of magnitude as an in-memory hit.
 
+
+## Query vs MVT encode
+
+`X-Debug-Timing: 1` on a tile request returns phase timings. `query` is
+dataset open + bbox/row-group discovery + row-group scan/decode/filter/clip;
+`encode` is MVT projection, clipping, and `mvt.Marshal`.
+
+### Local overview, 16 tiles at z5
+
+| Phase | Total | Per tile | Share |
+|---|---:|---:|---:|
+| Query | 2,688 ms | 168.0 ms | 93.9% |
+| MVT encode | 174.6 ms | 10.9 ms | 6.1% |
+| Total | 2,883 ms | 180.2 ms | |
+
+### Mapping Inequality over HTTPS, 16 tiles at z8
+
+| Run | Query | Dataset open | Bounds | Scan/decode | Encode | Features |
+|---|---:|---:|---:|---:|---:|---:|
+| First pass | 4,265 ms | 2,908 ms | 1.4 ms | 1,356 ms | 3.1 ms | 241 |
+| Second pass, warm range cache | 1,138 ms | 0 ms | 0 ms | 1,138 ms | 3.3 ms | 241 |
+| Filtered `category = 'Best'` | 993 ms | 0 ms | 0 ms | 993 ms | 0.6 ms | 24 |
+
+For the remote z8 area, only 241 features were returned across 16 tiles, so
+MVT encoding is negligible. The filtered query still scanned/decoded the same
+row groups; only the output size and encode time dropped.
+
+This makes the priority clear: the bottleneck is the Parquet query path, not
+MVT encoding. Geometry simplification will reduce payload bytes and some encode
+time, but will not fix cold query latency.
+
 ## What needs improvement
 
 1. **Cold first-hit latency is the main weakness.** PMTiles is already indexed
