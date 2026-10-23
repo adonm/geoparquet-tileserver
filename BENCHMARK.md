@@ -2,7 +2,12 @@
 
 These are informal single-host measurements for choosing an architecture, not
 a formal benchmark suite. The purpose is to show where the API path spends
-time and how much persistent caching helps.
+time and how much caching helps.
+
+> Historical note: the measurements below include a persistent disk cache that
+> has since been removed. The server now keeps encoded tiles and HTTP ranges in
+> memory only; persistent source caching belongs in an external object-store
+> proxy.
 
 ## Test areas
 
@@ -89,32 +94,25 @@ time, but will not fix cold query latency.
    - simplify geometry per zoom;
    - add a `properties` projection option;
    - consider lower precision / quantization for geometry.
-3. **Disk caching is essential.** The implemented cache stores both generated
-   tiles and 1 MiB HTTP range chunks. After a restart, the tested remote view
-   went from ~5.9 s to ~26 ms.
-4. **Raw asset passthrough ranges are chunk-cached now.** Finite range
-   requests up to 8 MiB are assembled from 1 MiB disk-cached chunks. Full
-   downloads and open-ended ranges still stream directly.
+3. **Caching is essential.** The current cache stores generated tiles in a
+   byte-bounded memory LRU and 1 MiB HTTP range chunks in a per-source memory
+   cache. Persistent caching, if needed, should be provided by an external
+   object-store proxy.
+4. **Raw asset passthrough ranges stream directly.** They no longer use a disk
+   chunk cache; upstream range support is forwarded unchanged.
 5. **PMTiles is the better serving format for static layers.** Use PMTiles for
    precomputed, unfiltered map layers; use the GeoParquet API for filtering,
    dynamic properties, and data that changes too often to pre-tile.
 
-## Persistent cache configuration
+## Memory tile cache configuration
 
 ```yaml
-cache_dir: "/cache"
-cache_disk_mb: 2048
+cache_tiles_mb: 256
+max_features: 100000
 ```
 
-The disk cache is content-addressed and bounded. When the size limit is
-exceeded, the least-recently-used files are removed. Mount `/cache` as a
-persistent Docker volume. The ko image runs as UID/GID `65532`, so the host
-cache directory must be writable by that user:
-
-```bash
-mkdir -p cache
-sudo chown 65532:65532 cache
-```
-
-Responses expose an `X-Cache` header of `memory`, `disk`, or `miss` for tile
-requests, which makes cache validation easy.
+Encoded MVT tiles are held in a byte-bounded in-memory LRU. Keys include the
+resolved catalog fingerprint, renderer/cache schema version, zoom/x/y,
+`min_count`, and a normalized filter hash. Responses expose an `X-Cache` header
+of `memory` or `miss` for tile requests. `GET /cache/stats` returns hit, miss,
+eviction, entry, and byte counters.

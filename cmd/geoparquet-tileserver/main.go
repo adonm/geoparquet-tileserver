@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -23,14 +26,14 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humachi"
 	"github.com/go-chi/chi/v5"
-	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/paulmach/orb"
 	"golang.org/x/sync/singleflight"
 
-	diskcache "github.com/adonm/geoparquet-tileserver/internal/cache"
+	"github.com/adonm/geoparquet-tileserver/internal/artifact"
 	"github.com/adonm/geoparquet-tileserver/internal/catalog"
 	"github.com/adonm/geoparquet-tileserver/internal/config"
 	filt "github.com/adonm/geoparquet-tileserver/internal/filter"
+	"github.com/adonm/geoparquet-tileserver/internal/tilecache"
 	"github.com/adonm/geoparquet-tileserver/internal/tiles"
 )
 
@@ -45,6 +48,10 @@ type layerEntry struct {
 	once  sync.Once
 	layer *tiles.Layer
 	err   error
+
+	artifacts      *artifact.Store
+	indexKey       string
+	catalogVersion string
 }
 
 func (e *layerEntry) get() (*tiles.Layer, error) {
@@ -64,8 +71,29 @@ func (e *layerEntry) get() (*tiles.Layer, error) {
 			return
 		}
 		e.layer, e.err = tiles.New(e.opts, items)
+		if e.err == nil && e.artifacts != nil && e.indexKey != "" {
+			if idx, ok := sLoadLayerIndex(e.artifacts, e.indexKey); ok {
+				_ = e.layer.ApplyIndex(idx)
+				slog.Info("layer index loaded", "collection", e.name, "key", e.indexKey)
+			} else {
+				go e.saveIndex()
+			}
+		}
 	})
 	return e.layer, e.err
+}
+
+func (e *layerEntry) saveIndex() {
+	if e.layer == nil || e.artifacts == nil || e.indexKey == "" {
+		return
+	}
+	idx, err := e.layer.BuildIndex(e.catalogVersion)
+	if err != nil {
+		return
+	}
+	_ = e.layer.ApplyIndex(idx)
+	sSaveLayerIndex(e.artifacts, e.indexKey, idx)
+	slog.Info("layer index saved", "collection", e.name, "key", e.indexKey)
 }
 
 func (e *layerEntry) bounds() orb.Bound {
@@ -84,20 +112,103 @@ func (e *layerEntry) bounds() orb.Bound {
 func (e *layerEntry) minZoom() int { return e.opts.MinZoom }
 func (e *layerEntry) maxZoom() int { return e.opts.MaxZoom }
 
+// tileCacheSchema is bumped whenever the MVT rendering or cache-key semantics
+// change, so encodings from an older build cannot be served.
+const tileCacheSchema = "tile-v2"
+
+// catalogVersion fingerprints the resolved catalog structure and its asset
+// bases. For versioned STAC roots this changes when the selected release
+// changes, which keeps tiles from different releases in separate cache keys.
+func catalogVersion(source string, cat *catalog.Catalog) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "source\x00%s\x00", source)
+	fmt.Fprintf(h, "catalog\x00%s\x00%s\x00", cat.ID, cat.Base)
+	for _, col := range cat.Collections {
+		fmt.Fprintf(h, "collection\x00%s\x00%s\x00", col.ID, col.Base)
+		names := make([]string, 0, len(col.Assets))
+		for name := range col.Assets {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			fmt.Fprintf(h, "asset\x00%s\x00%s\x00", name, col.Assets[name].Href)
+		}
+	}
+	for _, g := range cat.Groups {
+		fmt.Fprintf(h, "group\x00%s\x00%s\x00%s\x00", g.ID, g.Base, g.PMTiles)
+		for _, col := range g.Collections {
+			fmt.Fprintf(h, "member\x00%s\x00%s\x00", col.ID, col.Base)
+		}
+	}
+	sum := h.Sum(nil)
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+func tileCacheKey(st *catalogState, layer string, z uint8, x, y uint32, minCount int, filterLang, filter string) string {
+	if filterLang == "" {
+		filterLang = "cql2-text"
+	}
+	filterHash := sha256.Sum256([]byte(filterLang + "\x00" + normalizeFilter(filter)))
+	return fmt.Sprintf("%s|%s|%s|%s|%d|%d|%d|%d|%x",
+		tileCacheSchema, st.name, st.version, layer, z, x, y, minCount, filterHash[:8])
+}
+
+// normalizeFilter collapses insignificant whitespace outside quoted strings so
+// equivalent CQL2 text expressions share a cache entry without changing
+// literal values.
+func normalizeFilter(s string) string {
+	s = strings.TrimSpace(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	inQuote := false
+	pendingSpace := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' {
+			if inQuote && i+1 < len(s) && s[i+1] == '\'' {
+				b.WriteByte('\'')
+				b.WriteByte('\'')
+				i++
+				pendingSpace = false
+				continue
+			}
+			inQuote = !inQuote
+		}
+		if !inQuote {
+			switch ch {
+			case ' ', '\t', '\n', '\r':
+				pendingSpace = true
+				continue
+			}
+		}
+		if pendingSpace {
+			b.WriteByte(' ')
+			pendingSpace = false
+		}
+		b.WriteByte(ch)
+	}
+	return b.String()
+}
+
 type catalogState struct {
-	cat    *catalog.Catalog
-	base   string
-	layers map[string]*layerEntry
-	order  []string
+	name    string
+	cat     *catalog.Catalog
+	base    string
+	version string
+	layers  map[string]*layerEntry
+	order   []string
+
+	itemMu sync.Mutex
+	items  map[string]*itemSet
 }
 
 type server struct {
 	cfg        *config.Config
 	states     map[string]*catalogState
 	catalogURL map[string]string
-	cache      *lru.Cache[string, []byte]
-	disk       *diskcache.Disk
+	cache      *tilecache.Cache
 	group      singleflight.Group
+	artifacts  *artifact.Store
 }
 
 func (s *server) state(name string) *catalogState {
@@ -142,19 +253,24 @@ type TileInput struct {
 	Proto       string `header:"X-Forwarded-Proto"`
 	Catalog     string `query:"catalog" doc:"Named catalog alias from config"`
 	DebugTiming string `header:"X-Debug-Timing" doc:"Return render phase timings in response headers"`
+	IfNoneMatch string `header:"If-None-Match" doc:"Conditional tile request"`
+	AcceptEnc   string `header:"Accept-Encoding" doc:"Accepted response encodings"`
 }
 
 type TileOutput struct {
-	ContentType   string `header:"Content-Type"`
-	CacheControl  string `header:"Cache-Control"`
-	XCache        string `header:"X-Cache"`
-	XQueryMS      string `header:"X-Query-Ms"`
-	XOpenMS       string `header:"X-Open-Ms"`
-	XBoundsMS     string `header:"X-Bounds-Ms"`
-	XScanMS       string `header:"X-Scan-Ms"`
-	XEncodeMS     string `header:"X-Encode-Ms"`
-	XFeatureCount string `header:"X-Features"`
-	Body          []byte
+	ContentType     string `header:"Content-Type"`
+	ContentEncoding string `header:"Content-Encoding"`
+	CacheControl    string `header:"Cache-Control"`
+	ETag            string `header:"ETag"`
+	Vary            string `header:"Vary"`
+	XCache          string `header:"X-Cache"`
+	XQueryMS        string `header:"X-Query-Ms"`
+	XOpenMS         string `header:"X-Open-Ms"`
+	XBoundsMS       string `header:"X-Bounds-Ms"`
+	XScanMS         string `header:"X-Scan-Ms"`
+	XEncodeMS       string `header:"X-Encode-Ms"`
+	XFeatureCount   string `header:"X-Features"`
+	Body            []byte
 }
 
 type renderResult struct {
@@ -173,6 +289,9 @@ type TileJSON struct {
 	MinZoom      int           `json:"minzoom"`
 	MaxZoom      int           `json:"maxzoom"`
 	Bounds       []float64     `json:"bounds"`
+	Center       []float64     `json:"center,omitempty"`
+	Scheme       string        `json:"scheme,omitempty"`
+	Attribution  string        `json:"attribution,omitempty"`
 	VectorLayers []VectorLayer `json:"vector_layers"`
 }
 
@@ -245,7 +364,7 @@ func (s *server) entry(catalogName, collection string) (*catalogState, *layerEnt
 }
 
 func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
-	_, entry, err := s.entry(in.Catalog, in.Collection)
+	st, entry, err := s.entry(in.Catalog, in.Collection)
 	if err != nil {
 		if strings.HasPrefix(err.Error(), "unknown catalog") {
 			return nil, huma.Error404NotFound(err.Error())
@@ -275,31 +394,20 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 			return nil, huma.Error400BadRequest("invalid filter: " + err.Error())
 		}
 	}
-	key := fmt.Sprintf("%s/%s/%d/%d/%d/%d/%s/%s", in.Catalog, in.Collection, in.Z, in.X, y, minVal, in.FilterLang, in.Filter)
+	key := tileCacheKey(st, entry.name, in.Z, in.X, uint32(y), minVal, in.FilterLang, in.Filter)
+	gzipOK := acceptsGzip(in.AcceptEnc)
+	etag := tileETag(key, gzipOK)
+	if in.IfNoneMatch != "" && etagMatches(in.IfNoneMatch, etag) {
+		h := http.Header{}
+		h.Set("ETag", etag)
+		h.Set("Vary", "Accept-Encoding")
+		return nil, huma.ErrorWithHeaders(huma.Status304NotModified(), h)
+	}
 	debug := in.DebugTiming != ""
 	if !debug {
 		if b, ok := s.cache.Get(key); ok {
-			return &TileOutput{
-				ContentType:  "application/vnd.mapbox-vector-tile",
-				CacheControl: "public, max-age=3600",
-				XCache:       "memory",
-				Body:         b,
-			}, nil
+			return tileResponse(b, "memory", gzipOK, etag, nil), nil
 		}
-		if s.disk != nil {
-			if b, ok := s.disk.Get("tiles", key); ok {
-				s.cache.Add(key, b)
-				return &TileOutput{
-					ContentType:  "application/vnd.mapbox-vector-tile",
-					CacheControl: "public, max-age=3600",
-					XCache:       "disk",
-					Body:         b,
-				}, nil
-			}
-		}
-	}
-	if debug {
-		key += "/debug"
 	}
 	v, err, _ := s.group.Do(key, func() (any, error) {
 		layer, err := entry.get()
@@ -307,8 +415,8 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 			return nil, err
 		}
 		if debug {
-			b, st, err := layer.RenderDetailed(ctx, in.Z, in.X, uint32(y), minPtr, flt)
-			return renderResult{body: b, stats: st}, err
+			b, stats, err := layer.RenderDetailed(ctx, in.Z, in.X, uint32(y), minPtr, flt)
+			return renderResult{body: b, stats: stats}, err
 		}
 		b, err := layer.Render(ctx, in.Z, in.X, uint32(y), minPtr, flt)
 		return renderResult{body: b}, err
@@ -319,27 +427,74 @@ func (s *server) tile(ctx context.Context, in *TileInput) (*TileOutput, error) {
 	res := v.(renderResult)
 	b := res.body
 	if !debug {
-		s.cache.Add(key, b)
-		if s.disk != nil {
-			s.disk.Put("tiles", key, b)
-		}
+		s.cache.Put(key, b)
 	}
+	var stats *tiles.RenderStats
+	if debug {
+		st := res.stats
+		stats = &st
+	}
+	return tileResponse(b, "miss", gzipOK, etag, stats), nil
+}
+
+func tileResponse(b []byte, cache string, gzipOK bool, etag string, stats *tiles.RenderStats) *TileOutput {
 	out := &TileOutput{
 		ContentType:  "application/vnd.mapbox-vector-tile",
 		CacheControl: "public, max-age=3600",
-		XCache:       "miss",
+		ETag:         etag,
+		Vary:         "Accept-Encoding",
+		XCache:       cache,
 		Body:         b,
 	}
-	if debug {
-		st := res.stats
-		out.XQueryMS = strconv.FormatFloat(st.QueryMS(), 'f', 3, 64)
-		out.XOpenMS = strconv.FormatFloat(st.OpenMS, 'f', 3, 64)
-		out.XBoundsMS = strconv.FormatFloat(st.BoundsMS, 'f', 3, 64)
-		out.XScanMS = strconv.FormatFloat(st.ScanMS, 'f', 3, 64)
-		out.XEncodeMS = strconv.FormatFloat(st.EncodeMS, 'f', 3, 64)
-		out.XFeatureCount = strconv.Itoa(st.Features)
+	if gzipOK {
+		out.Body = gzipBytes(b)
+		out.ContentEncoding = "gzip"
 	}
-	return out, nil
+	if stats != nil {
+		out.XQueryMS = strconv.FormatFloat(stats.QueryMS(), 'f', 3, 64)
+		out.XOpenMS = strconv.FormatFloat(stats.OpenMS, 'f', 3, 64)
+		out.XBoundsMS = strconv.FormatFloat(stats.BoundsMS, 'f', 3, 64)
+		out.XScanMS = strconv.FormatFloat(stats.ScanMS, 'f', 3, 64)
+		out.XEncodeMS = strconv.FormatFloat(stats.EncodeMS, 'f', 3, 64)
+		out.XFeatureCount = strconv.Itoa(stats.Features)
+	}
+	return out
+}
+
+func tileETag(key string, gzipOK bool) string {
+	if gzipOK {
+		key += "|gzip"
+	}
+	sum := sha256.Sum256([]byte(key))
+	return fmt.Sprintf("\"%x\"", sum[:8])
+}
+
+func etagMatches(header, etag string) bool {
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		if part == "*" || strings.TrimPrefix(part, "W/") == etag {
+			return true
+		}
+	}
+	return false
+}
+
+func acceptsGzip(header string) bool {
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, "gzip") {
+			return !strings.Contains(part, "q=0")
+		}
+	}
+	return false
+}
+
+func gzipBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(b)
+	_ = zw.Close()
+	return buf.Bytes()
 }
 
 func (s *server) tileJSON(ctx context.Context, in *struct {
@@ -361,6 +516,14 @@ func (s *server) tileJSON(ctx context.Context, in *struct {
 	if in.Catalog != "" {
 		tileURL += "?catalog=" + url.QueryEscape(in.Catalog)
 	}
+	fields := map[string]string{}
+	if layer, err := entry.get(); err == nil {
+		for _, f := range layer.Fields() {
+			if !f.Geometry {
+				fields[f.Name] = f.Type
+			}
+		}
+	}
 	return &TileJSONOutput{Body: &TileJSON{
 		TileJSON: "3.0.0",
 		Name:     entry.name,
@@ -368,9 +531,11 @@ func (s *server) tileJSON(ctx context.Context, in *struct {
 		MinZoom:  entry.minZoom(),
 		MaxZoom:  entry.maxZoom(),
 		Bounds:   []float64{b.Min.X(), b.Min.Y(), b.Max.X(), b.Max.Y()},
+		Center:   []float64{(b.Min.X() + b.Max.X()) / 2, (b.Min.Y() + b.Max.Y()) / 2, float64(entry.minZoom())},
+		Scheme:   "xyz",
 		VectorLayers: []VectorLayer{{
 			ID:     entry.name,
-			Fields: map[string]string{},
+			Fields: fields,
 		}},
 	}}, nil
 }
@@ -485,11 +650,42 @@ func (s *server) items(_ context.Context, in *struct {
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS, POST")
 		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, If-None-Match, If-Modified-Since, Range")
 		w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func catalogAliasMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, api := range []string{"/stac-api", "/ogc"} {
+			prefix := api + "/catalogs/"
+			if !strings.HasPrefix(r.URL.Path, prefix) {
+				continue
+			}
+			rest := strings.TrimPrefix(r.URL.Path, prefix)
+			catalogName, tail, _ := strings.Cut(rest, "/")
+			if catalogName == "" {
+				break
+			}
+			if decoded, err := url.PathUnescape(catalogName); err == nil {
+				catalogName = decoded
+			}
+			path := api
+			if tail != "" {
+				path += "/" + tail
+			}
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = path
+			q := r2.URL.Query()
+			q.Set("catalog", catalogName)
+			r2.URL.RawQuery = q.Encode()
+			next.ServeHTTP(w, r2)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -546,20 +742,41 @@ func main() {
 	if catalogOverride != "" {
 		cfg.Catalog = catalogOverride
 	}
+	globalMaxFeatures = cfg.MaxFeatures
 
-	disk, err := diskcache.Open(cfg.CacheDir, cfg.CacheDiskMB)
-	if err != nil {
-		slog.Error("disk cache", "dir", cfg.CacheDir, "err", err)
-		os.Exit(1)
+	var artifacts *artifact.Store
+	if cfg.ObjectStore != nil {
+		artifacts, err = artifact.New(cfg.ObjectStore.URL, cfg.ObjectStore.ArtifactsBucket)
+		if err != nil {
+			slog.Error("object store", "err", err)
+			os.Exit(1)
+		}
+		routes := make([]tiles.ProxyRoute, 0, len(cfg.ObjectStore.Routes))
+		for _, r := range cfg.ObjectStore.Routes {
+			routes = append(routes, tiles.ProxyRoute{Prefix: r.Prefix, Bucket: r.Bucket})
+		}
+		tiles.ConfigureSourceProxy(cfg.ObjectStore.URL, routes)
+		slog.Info("object store configured", "url", cfg.ObjectStore.URL, "artifacts", cfg.ObjectStore.ArtifactsBucket, "proxy_routes", len(routes))
 	}
-	tiles.ConfigureDiskCache(disk)
-	s := &server{cfg: cfg, states: map[string]*catalogState{}, catalogURL: map[string]string{}, disk: disk}
+	s := &server{
+		cfg:        cfg,
+		states:     map[string]*catalogState{},
+		catalogURL: map[string]string{},
+		cache:      tilecache.New(int64(cfg.CacheTilesMB) << 20),
+		artifacts:  artifacts,
+	}
 	build := func(name, catalogURL string) error {
 		cat, err := catalog.Load(catalogURL)
 		if err != nil {
 			return err
 		}
-		st := &catalogState{cat: cat, base: catalogURL, layers: map[string]*layerEntry{}}
+		st := &catalogState{
+			name:    name,
+			cat:     cat,
+			base:    catalogURL,
+			version: catalogVersion(catalogURL, cat),
+			layers:  map[string]*layerEntry{},
+		}
 		if len(cfg.Layers) > 0 {
 			for _, lc := range cfg.Layers {
 				col := cat.Collection(lc.Collection)
@@ -611,6 +828,14 @@ func main() {
 				st.order = append(st.order, group.ID)
 			}
 		}
+		for _, e := range st.layers {
+			e.opts.ExcludeProps = cfg.ExcludeProps
+			e.opts.IDColumn = cfg.IDColumn
+			e.opts.Simplify = cfg.Simplify
+			e.artifacts = s.artifacts
+			e.catalogVersion = st.version
+			e.indexKey = "index/v1/" + st.version + "/" + e.name + ".json.gz"
+		}
 		if len(st.layers) == 0 {
 			return fmt.Errorf("catalog %q has no usable collections", catalogURL)
 		}
@@ -635,17 +860,20 @@ func main() {
 			os.Exit(1)
 		}
 	}
-	s.cache, _ = lru.New[string, []byte](cfg.CacheTiles)
 
 	router := chi.NewMux()
 	router.Use(cors)
 	router.Use(htmlRedirect)
+	router.Use(catalogAliasMiddleware)
+	s.registerSTACAPI(router)
+	s.registerOGCAPI(router)
 	router.Get("/", s.indexHTML)
 	router.Get("/stac", s.catalogSTAC)
 	router.Get("/index.html", s.indexHTML)
 	router.Get("/collections.html", s.collectionsHTML)
 	router.Get("/collections/{collection}.html", s.collectionHTML)
 	router.Get("/collections/{collection}/items.html", s.itemsHTML)
+	router.Get("/cache/stats", s.cacheStats)
 	router.Get("/collections/{collection}/style.json", s.collectionStyle)
 	router.Get("/collections/{collection}/stac", s.collectionSTAC)
 	router.Get("/collections/{collection}/assets/{asset}", s.collectionAsset)
@@ -742,7 +970,7 @@ func main() {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	slog.Info("listening", "addr", cfg.Listen, "catalogs", len(s.states))
+	slog.Info("listening", "addr", cfg.Listen, "catalogs", len(s.states), "tile_cache_mb", cfg.CacheTilesMB)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
@@ -756,6 +984,11 @@ func catalogFromRequest(r *http.Request) string {
 	return r.URL.Query().Get("catalog")
 }
 
+func (s *server) cacheStats(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.cache.Stats())
+}
+
 func contentRangeTotal(v string) (int64, bool) {
 	i := strings.LastIndex(v, "/")
 	if i < 0 || i+1 >= len(v) {
@@ -765,174 +998,16 @@ func contentRangeTotal(v string) (int64, bool) {
 	return n, err == nil && n > 0
 }
 
-type assetMeta struct {
-	Total       int64  `json:"total"`
-	ContentType string `json:"content_type"`
-}
-
-func parseRangeHeader(v string) (int64, int64, bool) {
-	if !strings.HasPrefix(v, "bytes=") || strings.Contains(v, ",") {
-		return 0, 0, false
-	}
-	startText, endText, ok := strings.Cut(strings.TrimPrefix(v, "bytes="), "-")
-	if !ok || startText == "" || endText == "" {
-		return 0, 0, false
-	}
-	start, err1 := strconv.ParseInt(startText, 10, 64)
-	end, err2 := strconv.ParseInt(endText, 10, 64)
-	if err1 != nil || err2 != nil || start < 0 || end < start {
-		return 0, 0, false
-	}
-	return start, end, true
-}
-
-func (s *server) assetInfo(r *http.Request, href, fallbackType string) (assetMeta, bool) {
-	meta := assetMeta{ContentType: fallbackType}
-	if s.disk != nil {
-		if raw, ok := s.disk.Get("asset-meta", href); ok {
-			var cached assetMeta
-			if json.Unmarshal(raw, &cached) == nil && cached.Total > 0 {
-				return cached, true
-			}
-		}
-	}
-	head, err := http.NewRequestWithContext(r.Context(), http.MethodHead, href, nil)
-	if err == nil {
-		head.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
-		if resp, err := http.DefaultClient.Do(head); err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				if n, err := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64); err == nil && n > 0 {
-					meta.Total = n
-					if ct := resp.Header.Get("Content-Type"); ct != "" {
-						meta.ContentType = ct
-					}
-				}
-			}
-		}
-	}
-	if meta.Total <= 0 {
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, href, nil)
-		if err != nil {
-			return assetMeta{}, false
-		}
-		req.Header.Set("Range", "bytes=0-0")
-		req.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return assetMeta{}, false
-		}
-		defer resp.Body.Close()
-		if total, ok := contentRangeTotal(resp.Header.Get("Content-Range")); ok {
-			meta.Total = total
-		}
-		if ct := resp.Header.Get("Content-Type"); ct != "" {
-			meta.ContentType = ct
-		}
-	}
-	if meta.Total <= 0 {
-		return assetMeta{}, false
-	}
-	if s.disk != nil {
-		if raw, err := json.Marshal(meta); err == nil {
-			s.disk.Put("asset-meta", href, raw)
-		}
-	}
-	return meta, true
-}
-
-func (s *server) serveCachedRange(w http.ResponseWriter, r *http.Request, href string, start, end int64, contentType string) bool {
-	// Only cache small, finite ranges. Larger requests stream as before.
-	if s.disk == nil || end < start || end-start > 8<<20 {
-		return false
-	}
-	meta, ok := s.assetInfo(r, href, contentType)
-	if !ok {
-		return false
-	}
-	if start >= meta.Total {
-		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
-		return true
-	}
-	if end >= meta.Total {
-		end = meta.Total - 1
-	}
-	const chunkSize = 1 << 20
-	first := start - start%chunkSize
-	last := end - end%chunkSize
-	var body []byte
-	for off := first; off <= last; off += chunkSize {
-		key := href + "|" + strconv.FormatInt(off, 10)
-		var chunk []byte
-		if b, ok := s.disk.Get("ranges", key); ok {
-			chunk = b
-		} else {
-			req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, href, nil)
-			if err != nil {
-				return false
-			}
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+chunkSize-1))
-			req.Header.Set("User-Agent", "geoparquet-tileserver/0.1")
-			resp, err := http.DefaultClient.Do(req)
-			if err != nil {
-				return false
-			}
-			chunk, err = io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil || (resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK) {
-				return false
-			}
-			s.disk.Put("ranges", key, chunk)
-		}
-		from := int64(0)
-		if off == first {
-			from = start - first
-		}
-		to := int64(len(chunk))
-		if off == last {
-			to = end - last + 1
-			if to > int64(len(chunk)) {
-				to = int64(len(chunk))
-			}
-		}
-		if from < to {
-			body = append(body, chunk[from:to]...)
-		}
-	}
-	if len(body) == 0 && start <= end {
-		return false
-	}
-	ct := meta.ContentType
-	if ct == "" {
-		ct = contentType
-	}
-	if ct == "" {
-		ct = "application/octet-stream"
-	}
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, meta.Total))
-	w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.WriteHeader(http.StatusPartialContent)
-	_, _ = w.Write(body)
-	return true
-}
-
 // proxyAsset streams a local or remote STAC asset. Remote range headers are
 // forwarded so Parquet consumers can keep using HTTP range reads.
 func (s *server) serveAsset(w http.ResponseWriter, r *http.Request, href, contentType string) {
 	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
+		href = tiles.ProxyURL(href)
 		method := r.Method
 		if method == "" {
 			method = http.MethodGet
 		}
 		headRequest := method == http.MethodHead
-		if !headRequest {
-			if start, end, ok := parseRangeHeader(r.Header.Get("Range")); ok && s.serveCachedRange(w, r, href, start, end, contentType) {
-				return
-			}
-		}
 		// Some CDNs (notably the Overture PMTiles bucket) reject HEAD and
 		// open-ended ranges. A one-byte GET gives us the total length for a
 		// standards-compliant HEAD response.
@@ -1010,13 +1085,25 @@ func (s *server) collectionStyle(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	q := ""
-	if catalogName != "" && catalogName != "default" {
-		q = "?catalog=" + url.QueryEscape(catalogName)
-	}
 	base := strings.TrimRight(s.cfg.BaseURL, "/")
 	id := url.PathEscape(entry.name)
-	tileURL := base + "/collections/" + id + "/tiles/{z}/{x}/{y}.mvt" + q
+	params := url.Values{}
+	if catalogName != "" && catalogName != "default" {
+		params.Set("catalog", catalogName)
+	}
+	if filter := r.URL.Query().Get("filter"); filter != "" {
+		params.Set("filter", filter)
+		if lang := r.URL.Query().Get("filter-lang"); lang != "" {
+			params.Set("filter-lang", lang)
+		}
+	}
+	if min := r.URL.Query().Get("min_count"); min != "" {
+		params.Set("min_count", min)
+	}
+	tileURL := base + "/collections/" + id + "/tiles/{z}/{x}/{y}.mvt"
+	if len(params) > 0 {
+		tileURL += "?" + params.Encode()
+	}
 	b := entry.bounds()
 	span := math.Max(b.Max.X()-b.Min.X(), b.Max.Y()-b.Min.Y())
 	zoom := 4
@@ -1058,7 +1145,19 @@ func (s *server) collectionStyle(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
-	_ = json.NewEncoder(w).Encode(style)
+	body, err := json.Marshal(style)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sum := sha256.Sum256(body)
+	etag := fmt.Sprintf("\"%x\"", sum[:8])
+	w.Header().Set("ETag", etag)
+	if in := r.Header.Get("If-None-Match"); in != "" && etagMatches(in, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 func (s *server) catalogSTAC(w http.ResponseWriter, r *http.Request) {

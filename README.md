@@ -23,7 +23,7 @@ It is deliberately narrower than a general tile platform such as Tegola:
 - virtual groups stitch sibling collections (for example Overture themes)
   into one filterable MVT layer
 - direct passthrough for STAC documents and all discovered assets
-- browseable Bootstrap HTML directory with links to collections, groups,
+- browseable HTML directory with links to collections, groups,
   items, tiles, TileJSON, raw STAC, and passthrough files
 - server-generated MapLibre styles for rendering arbitrary MVT layers in RustGIS
 - "Open in RustGIS" links for catalogs, collections, and virtual groups
@@ -39,7 +39,10 @@ It is deliberately narrower than a general tile platform such as Tegola:
 - MVT encoding with `orb/encoding/mvt`
 - all scalar Parquet properties become MVT properties
 - Basic CQL2 text/JSON filtering via `?filter=...`
-- LRU tile cache plus request coalescing
+- STAC API 1.0 surface with STAC 1.1 collections/items and item search
+- OGC API Features 1.0 + CQL2 and OGC API Tiles 1.0 (WebMercatorQuad)
+- TileJSON 3.0 and generated MapLibre styles
+- byte-bounded memory tile cache with versioned keys and request coalescing
 - named catalogs selectable with `?catalog=<name>`
 - TileJSON, collections, health, OpenAPI docs
 - optional OpenTunnel public HTTPS with no inbound 80/443 listener
@@ -87,8 +90,93 @@ Browsers requesting `/collections`, `/collections/{collection}`, or
 the corresponding `.html` page. JSON clients keep getting JSON from the same
 paths.
 
-The UI uses Bootstrap 5.3.8 from jsDelivr. Bootstrap 6 has not been released;
-5.3.8 is the current stable release.
+The UI uses [Oat UI](https://oat.ink) 1.0.0 from jsDelivr, loaded as pinned CSS
+and JS assets with no build step.
+
+## Standards APIs
+
+The server exposes two standards-facing surfaces on top of the existing
+browseable HTML and tile routes. Both work with the default catalog or a named
+catalog. Named catalogs can use `?catalog=<name>` or a path alias:
+`/stac-api/catalogs/<name>` and `/ogc/catalogs/<name>`. The path aliases are
+the most compatible form for clients that append paths to the connection URL.
+
+### STAC API
+
+`/stac-api` publishes STAC 1.1 metadata through STAC API 1.0:
+
+```text
+GET  /stac-api
+GET  /stac-api/catalogs/{catalog}
+GET  /stac-api/conformance
+GET  /stac-api/collections                  bbox, datetime, limit, offset, q, filter, sortby
+GET  /stac-api/collections/{id}
+GET  /stac-api/collections/{id}/items       bbox, datetime, limit, filter, sortby, fields
+GET  /stac-api/collections/{id}/items/{id}
+GET  /stac-api/search                       GET and POST item search
+GET  /stac-api/queryables
+GET  /stac-api/collections/{id}/queryables
+GET  /stac-api/collections/{id}/schema
+GET  /stac-api/collections/{id}/sortables
+GET  /stac-api/api                           OpenAPI 3.0 description
+```
+
+Item search supports `collections`, `ids`, `bbox`, `intersects`, `datetime`,
+`limit`, `filter` / `filter-lang`, `sortby`, fields selection, and opaque
+pagination tokens. STAC Items keep their source geometry and local passthrough
+asset URLs.
+
+### OGC API Features and Tiles
+
+`/ogc` publishes the feature and tile plane, separate from STAC metadata:
+
+```text
+GET /ogc
+GET /ogc/catalogs/{catalog}
+GET /ogc/conformance
+GET /ogc/api
+GET /ogc/collections
+GET /ogc/collections/{id}
+GET /ogc/collections/{id}/items             bbox, datetime, limit, offset, filter, sortby
+GET /ogc/collections/{id}/items/{featureId}
+GET /ogc/collections/{id}/queryables
+GET /ogc/collections/{id}/schema
+GET /ogc/collections/{id}/sortables
+GET /ogc/collections/{id}/tiles
+GET /ogc/collections/{id}/tiles/WebMercatorQuad
+GET /ogc/collections/{id}/tiles/WebMercatorQuad/{z}/{y}/{x}
+GET /ogc/tileMatrixSets/WebMercatorQuad
+```
+
+The feature endpoints return actual GeoParquet features as GeoJSON. The tile
+endpoints use the OGC `{tileMatrix}/{tileRow}/{tileCol}` (z/y/x) path order and
+advertise `WebMercatorQuad`.
+
+`max_features` caps a single feature or item result set; it defaults to and is
+limited to `100000`.
+
+### Client setup
+
+- **QGIS STAC**: add a STAC connection to
+  `https://<host>/stac-api/catalogs/<name>` for a named catalog, or
+  `https://<host>/stac-api` for the default catalog.
+- **QGIS OAPIF**: add an OGC API Features connection to
+  `https://<host>/ogc/catalogs/<name>` for a named catalog; enable
+  `restrictToRequestBBOX=1` for viewport-driven loading.
+- **QGIS vector tiles**: use the existing style URL
+  `/collections/{id}/style.json` with an XYZ template, or the `/ogc` tileset.
+- **RustGIS STAC**: use
+  `https://web.rustgis.app/?stac=https://<host>/stac-api/catalogs/<name>` or
+  open a collection through `?stac=`.
+- **RustGIS tiles**: use `?style=<style.json>` for dynamic filtered tiles, or
+  `?data=<parquet-or-pmtiles>` for direct range reads.
+- **MapLibre**: use `/collections/{id}/tilejson.json` as a vector source, or
+  load `/collections/{id}/style.json`.
+- **Leaflet**: use `Leaflet.VectorGrid` or `maplibre-gl-leaflet`; native
+  Leaflet tile layers only render raster tiles.
+
+Tile and style responses expose `ETag` and support `If-None-Match` / `304`.
+Tiles are gzip-compressed when requested.
 
 ### RustGIS links
 
@@ -199,9 +287,19 @@ Endpoints:
 GET /collections?catalog=<name>
 GET /collections/{collection}
 GET /collections/{collection}/tilejson.json?catalog=<name>
+GET /collections/{collection}/style.json?catalog=<name>
 GET /collections/{collection}/tiles/{z}/{x}/{y}.mvt?catalog=<name>
 GET /collections/{collection}/tiles/{z}/{x}/{y}.mvt?filter=...
 GET /collections/{collection}/items?catalog=<name>
+GET /stac-api
+GET /stac-api/collections
+GET /stac-api/collections/{collection}/items
+GET /stac-api/search
+GET /ogc
+GET /ogc/collections
+GET /ogc/collections/{collection}/items
+GET /ogc/collections/{collection}/tiles/WebMercatorQuad/{z}/{y}/{x}
+GET /cache/stats
 GET /healthz
 GET /docs
 GET /openapi.json
@@ -352,23 +450,70 @@ Warm z8 tile, local loopback, 200 concurrent requests:
 
 Results are environment-specific.
 
-## Persistent cache
+## Memory tile cache
 
-The tile cache and HTTP range cache can be persisted across restarts:
+Encoded MVT tiles are cached in memory only; there is no persistent disk cache.
+The cache is byte-bounded and uses LRU eviction:
 
 ```yaml
-cache_dir: "/cache"
-cache_disk_mb: 2048
+cache_tiles_mb: 256
+max_features: 100000
 ```
 
-Mount `/cache` as a Docker volume. The ko image runs as UID/GID `65532`:
+Tile keys include the resolved catalog fingerprint (so a new STAC release does
+not reuse old tiles), the renderer/cache schema version, zoom/x/y, `min_count`,
+and a normalized filter hash. Tile responses expose `X-Cache: memory` or
+`X-Cache: miss`. Cache counters and byte usage are available at
+`GET /cache/stats`.
 
-```bash
-mkdir -p cache
-sudo chown 65532:65532 cache
+Remote Parquet range reads use a separate 64 MiB in-process chunk cache per
+open source. Persistent source caching is intentionally left to an external
+object-store proxy.
+
+Tile and style responses carry a strong `ETag`; `If-None-Match` returns `304`.
+Tiles are gzip-compressed when the client accepts it, with `Vary:
+Accept-Encoding`. `max_features` defaults to `100000` and is the hard upper
+bound for one feature or item request.
+
+## pgvs3 acceleration
+
+The optional `object_store` block points metadata indexes and remote range
+reads at [pgvs3](../pgvs3). pgvs3 keeps the index artifacts in a durable
+bucket and range chunks in a volatile cache namespace.
+
+```yaml
+object_store:
+  url: "http://127.0.0.1:8014"
+  artifacts_bucket: "geoparquet-derived"
+  routes:
+    - prefix: "https://data.source.coop/"
+      bucket: "sourcecoop"
+    - prefix: "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/"
+      bucket: "overturemaps-us-west-2"
 ```
 
-Tile responses expose `X-Cache: memory`, `X-Cache: disk`, or `X-Cache: miss`.
-Finite passthrough range requests up to 8 MiB are assembled from disk-cached
-1 MiB chunks; full downloads and open-ended ranges still stream directly.
-The disk cache is bounded and evicts the least-recently-used entries first.
+The collection index is built once per catalog release and stored at:
+
+```text
+index/v1/<catalogVersion>/<collection>.json.gz
+```
+
+It contains field schemas and per-level row-group bounds. Loading it avoids
+reopening Parquet footers and rescanning bbox pages on a cold start. When the
+index is missing, it is built after the first request and written with
+`If-None-Match: *`. Builds are capped at 64 partitions; larger catalogs keep
+the normal lazy row-group path instead of opening every remote footer at once.
+
+pgvs3 should be configured with `--range-cache-chunk 1048576` (or the
+equivalent stored-origin setting) so ranges of large Parquet objects are cached
+as aligned chunks. pgvs3 listens only on loopback/private networks; it has no
+authentication and must not be exposed through OpenTunnel.
+
+Geometry simplification is controlled by `simplify` (MVT tile units, default
+`1.0`). Optional projection controls:
+
+```yaml
+simplify: 1.0
+exclude_properties: ["geom_bbox", "bbox"]
+id_column: "id"
+```

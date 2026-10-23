@@ -40,6 +40,7 @@ type Item struct {
 	Links      []Link           `json:"links"`
 	Properties map[string]any   `json:"properties"`
 	Base       string           `json:"-"`
+	Raw        json.RawMessage  `json:"-"`
 }
 
 // Collection is a STAC collection. Items are loaded lazily so a catalog root
@@ -54,6 +55,7 @@ type Collection struct {
 	Assets      map[string]Asset
 	Links       []Link
 	Base        string
+	Raw         json.RawMessage
 
 	directItems []Item
 	once        sync.Once
@@ -169,7 +171,7 @@ func Load(path string) (*Catalog, error) {
 			c.add(col)
 			return &node{id: id, title: id, isCollection: true, collection: col}, nil
 		case isCollection(head):
-			col := newCollection(p, head)
+			col := newCollection(p, head, data)
 			c.add(col)
 			return &node{id: col.ID, title: col.Title, isCollection: true, collection: col}, nil
 		}
@@ -186,7 +188,7 @@ func Load(path string) (*Catalog, error) {
 		// A catalog can itself expose items. Treat it as a synthetic
 		// collection when it has item links but no child catalogs.
 		if hasRel(head.Links, "item") && !hasRel(head.Links, "child") {
-			col := newCollection(p, head)
+			col := newCollection(p, head, data)
 			c.add(col)
 			return &node{id: col.ID, title: col.Title, isCollection: true, collection: col}, nil
 		}
@@ -363,7 +365,7 @@ func isCollection(head rawHead) bool {
 	return len(head.Extent.Spatial.BBox) > 0 && len(head.Links) > 0
 }
 
-func newCollection(p string, head rawHead) *Collection {
+func newCollection(p string, head rawHead, raw json.RawMessage) *Collection {
 	bbox := head.BBox
 	if len(bbox) < 4 && len(head.Extent.Spatial.BBox) > 0 {
 		bbox = unionBBoxes(head.Extent.Spatial.BBox)
@@ -382,6 +384,7 @@ func newCollection(p string, head rawHead) *Collection {
 		Assets:      head.Assets,
 		Links:       head.Links,
 		Base:        p,
+		Raw:         append(json.RawMessage(nil), raw...),
 	}
 }
 
@@ -440,6 +443,32 @@ func (c *Collection) Bound() orb.Bound {
 	return orb.Bound{Min: orb.Point{-180, -85}, Max: orb.Point{180, 85}}
 }
 
+// Temporal returns the collection's declared temporal extent, if any.
+func (c *Collection) Temporal() (string, string, bool) {
+	if c == nil || len(c.Raw) == 0 {
+		return "", "", false
+	}
+	var raw struct {
+		Extent struct {
+			Temporal struct {
+				Interval [][]*string `json:"interval"`
+			} `json:"temporal"`
+		} `json:"extent"`
+	}
+	if json.Unmarshal(c.Raw, &raw) != nil || len(raw.Extent.Temporal.Interval) == 0 {
+		return "", "", false
+	}
+	iv := raw.Extent.Temporal.Interval[0]
+	if len(iv) < 2 || iv[0] == nil {
+		return "", "", false
+	}
+	end := *iv[0]
+	if iv[1] != nil {
+		end = *iv[1]
+	}
+	return *iv[0], end, true
+}
+
 // Items loads the collection's item documents on first use. Collections with
 // their own GeoParquet assets (common for single-file Source Cooperative
 // datasets) are represented as one synthetic item.
@@ -483,12 +512,21 @@ func (c *Collection) loadItems() ([]Item, error) {
 		if len(c.Assets) == 0 {
 			return nil, fmt.Errorf("collection %q has no items or assets", c.ID)
 		}
+		props := map[string]any{}
+		if start, end, ok := c.Temporal(); ok {
+			props["datetime"] = start
+			if start != end {
+				props["start_datetime"] = start
+				props["end_datetime"] = end
+			}
+		}
 		return []Item{{
 			Type:       "Feature",
 			ID:         c.ID,
 			Collection: c.ID,
 			BBox:       c.BBox,
 			Assets:     c.Assets,
+			Properties: props,
 			Base:       c.Base,
 		}}, nil
 	}
@@ -546,6 +584,7 @@ func fetchItem(href string) (Item, error) {
 		return Item{}, err
 	}
 	it.Base = href
+	it.Raw = append(json.RawMessage(nil), data...)
 	if it.ID == "" {
 		it.ID = pathID(href)
 	}
@@ -570,6 +609,7 @@ func fetchItemCollection(href string) ([]Item, error) {
 			continue
 		}
 		it.Base = href
+		it.Raw = append(json.RawMessage(nil), raw...)
 		if it.ID == "" {
 			it.ID = pathID(href)
 		}

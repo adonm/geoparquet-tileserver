@@ -12,8 +12,6 @@ import (
 	"time"
 
 	"golang.org/x/sync/singleflight"
-
-	diskcache "github.com/adonm/geoparquet-tileserver/internal/cache"
 )
 
 type source struct {
@@ -23,6 +21,7 @@ type source struct {
 }
 
 func openSource(path string) (*source, error) {
+	path = ProxyURL(path)
 	if strings.HasPrefix(path, "http://") || strings.HasPrefix(path, "https://") {
 		client := &http.Client{Timeout: 60 * time.Second}
 		size, err := remoteSize(client, path)
@@ -82,13 +81,6 @@ func remoteSize(client *http.Client, url string) (int64, error) {
 const httpChunkSize = 1 << 20
 const httpCacheMax = 64 << 20
 
-var diskCache *diskcache.Disk
-
-// ConfigureDiskCache enables persistent range caching for all HTTP sources.
-func ConfigureDiskCache(d *diskcache.Disk) {
-	diskCache = d
-}
-
 type httpReaderAt struct {
 	url    string
 	client *http.Client
@@ -129,19 +121,9 @@ func (h *httpReaderAt) chunk(start int64) ([]byte, error) {
 		if b, ok := h.memChunk(start); ok {
 			return b, nil
 		}
-		key := h.url + "|" + strconv.FormatInt(start, 10)
-		if diskCache != nil {
-			if b, ok := diskCache.Get("ranges", key); ok {
-				h.storeChunk(start, b)
-				return b, nil
-			}
-		}
 		b, err := h.fetch(start, httpChunkSize)
 		if err != nil {
 			return nil, err
-		}
-		if diskCache != nil {
-			diskCache.Put("ranges", key, b)
 		}
 		h.storeChunk(start, b)
 		return b, nil

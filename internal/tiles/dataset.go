@@ -432,6 +432,18 @@ func valueFloat(v parquet.Value) float64 {
 type rowFunc func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any)
 
 func (d *Dataset) ScanRowGroup(rg int, fn rowFunc) error {
+	return d.scanRowGroup(rg, func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) bool {
+		fn(geom, bound, hasBBox, props)
+		return true
+	})
+}
+
+// ScanRowGroupUntil scans one row group and stops early when fn returns false.
+func (d *Dataset) ScanRowGroupUntil(rg int, fn func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) bool) error {
+	return d.scanRowGroup(rg, fn)
+}
+
+func (d *Dataset) scanRowGroup(rg int, fn func(geom []byte, bound orb.Bound, hasBBox bool, props map[string]any) bool) error {
 	r := parquet.NewRowGroupReader(d.file.RowGroups()[rg])
 	defer r.Close()
 	columns := r.Schema().Columns()
@@ -478,7 +490,9 @@ func (d *Dataset) ScanRowGroup(rg int, fn rowFunc) error {
 				return true
 			})
 			if geom != nil {
-				fn(geom, bound, hasBBox, props)
+				if !fn(geom, bound, hasBBox, props) {
+					return nil
+				}
 			}
 		}
 		if err == io.EOF {

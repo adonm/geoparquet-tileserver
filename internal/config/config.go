@@ -8,15 +8,29 @@ import (
 )
 
 type Config struct {
-	Listen      string            `yaml:"listen"`
-	BaseURL     string            `yaml:"base_url"`
-	Catalog     string            `yaml:"catalog"`
-	CacheTiles  int               `yaml:"cache_tiles"`
-	CacheDir    string            `yaml:"cache_dir"`
-	CacheDiskMB int               `yaml:"cache_disk_mb"`
-	Preload     bool              `yaml:"preload"`
-	Layers      []Layer           `yaml:"layers"`
-	Catalogs    map[string]string `yaml:"catalogs"`
+	Listen       string             `yaml:"listen"`
+	BaseURL      string             `yaml:"base_url"`
+	Catalog      string             `yaml:"catalog"`
+	CacheTilesMB int                `yaml:"cache_tiles_mb"`
+	MaxFeatures  int                `yaml:"max_features"`
+	Preload      bool               `yaml:"preload"`
+	Layers       []Layer            `yaml:"layers"`
+	Catalogs     map[string]string  `yaml:"catalogs"`
+	ObjectStore  *ObjectStoreConfig `yaml:"object_store"`
+	ExcludeProps []string           `yaml:"exclude_properties"`
+	IDColumn     string             `yaml:"id_column"`
+	Simplify     float64            `yaml:"simplify"`
+}
+
+type ObjectStoreConfig struct {
+	URL             string             `yaml:"url"`
+	ArtifactsBucket string             `yaml:"artifacts_bucket"`
+	Routes          []ObjectStoreRoute `yaml:"routes"`
+}
+
+type ObjectStoreRoute struct {
+	Prefix string `yaml:"prefix"`
+	Bucket string `yaml:"bucket"`
 }
 
 type Layer struct {
@@ -39,11 +53,33 @@ func Load(path string) (*Config, error) {
 	if c.Listen == "" {
 		c.Listen = "127.0.0.1:8080"
 	}
-	if c.CacheTiles == 0 {
-		c.CacheTiles = 4096
+	if c.CacheTilesMB == 0 {
+		c.CacheTilesMB = 256
 	}
-	if c.CacheDir != "" && c.CacheDiskMB == 0 {
-		c.CacheDiskMB = 2048
+	if c.CacheTilesMB < 0 {
+		return nil, fmt.Errorf("cache_tiles_mb must be positive")
+	}
+	if c.MaxFeatures == 0 {
+		c.MaxFeatures = 100000
+	}
+	if c.MaxFeatures < 0 || c.MaxFeatures > 100000 {
+		return nil, fmt.Errorf("max_features must be between 1 and 100000")
+	}
+	if c.Simplify == 0 {
+		c.Simplify = 1.0
+	}
+	if c.Simplify < 0 {
+		c.Simplify = 0
+	}
+	if c.ObjectStore != nil {
+		if c.ObjectStore.URL == "" || c.ObjectStore.ArtifactsBucket == "" {
+			return nil, fmt.Errorf("object_store requires url and artifacts_bucket")
+		}
+		for i, route := range c.ObjectStore.Routes {
+			if route.Prefix == "" || route.Bucket == "" {
+				return nil, fmt.Errorf("object_store.routes[%d] requires prefix and bucket", i)
+			}
+		}
 	}
 	if c.Catalog == "" {
 		c.Catalog = "https://stac.overturemaps.org/catalog.json"

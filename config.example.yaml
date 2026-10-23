@@ -13,11 +13,26 @@ catalogs:
 #   ./geoparquet-tileserver --config config.yaml --catalog https://...
 listen: "127.0.0.1:8080"
 base_url: "http://127.0.0.1:8080"
-cache_tiles: 4096
-# persistent HTTP-range and tile cache; mount this directory in Docker
-# cache_dir: "/cache"
-# cache_disk_mb: 2048
+# encoded MVT tiles, byte-bounded in-memory LRU
+cache_tiles_mb: 256
+# hard upper bound for one feature or STAC item search request
+max_features: 100000
+# geometry simplification in MVT tile units (0 disables)
+simplify: 1.0
+# optional property projection / stable feature id
+# exclude_properties: ["geom_bbox", "bbox"]
+# id_column: "id"
 preload: false
+
+# Optional pgvs3-backed derived-artifact store and source proxy.
+# object_store:
+#   url: "http://127.0.0.1:8014"
+#   artifacts_bucket: "geoparquet-derived"
+#   routes:
+#     - prefix: "https://data.source.coop/"
+#       bucket: "sourcecoop"
+#     - prefix: "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/"
+#       bucket: "overturemaps-us-west-2"
 
 # Layers are normally generated from the STAC collections automatically.
 # Add layers only to rename, subset, or change zoom ranges:

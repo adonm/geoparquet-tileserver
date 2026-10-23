@@ -82,22 +82,14 @@ docker run -d --name geoparquet-tileserver-test \
   --restart unless-stopped \
   -p 127.0.0.1:18110:8080 \
   -v "$PWD/config.host.yaml:/config.yaml:ro" \
-  -v "$PWD/cache:/cache" \
   ko.local/geoparquet-tileserver:latest \
   --config /config.yaml --listen :8080
 ```
 
 Set `base_url` in the uncommitted `config.host.yaml` to the current random
 OpenTunnel URL so TileJSON, styles, HTML links, and RustGIS links resolve
-correctly.
-
-The ko image runs as UID/GID `65532`; make the cache directory writable by that
-user:
-
-```bash
-mkdir -p cache
-sudo chown 65532:65532 cache
-```
+correctly. The tile cache is in-memory (`cache_tiles_mb`); no cache volume is
+mounted.
 
 ## PostgreSQL
 
@@ -109,6 +101,34 @@ The benchmark PostgreSQL container is loopback-only:
 
 Never publish a database on `0.0.0.0`. Do not expose PostgreSQL through the
 public tunnel without a protocol-aware proxy and authentication.
+
+## pgvs3 accelerator
+
+The optional pgvs3 object-store cache/artifact service is loopback/private
+only. It has no authentication by design; anyone who can reach `:8014` can
+read or mutate every namespace. Do not put it behind OpenTunnel.
+
+```text
+127.0.0.1:8014 -> pgvs3 (HTTP/S3/RESP/SQS)
+```
+
+Recommended tileserver config:
+
+```yaml
+object_store:
+  url: "http://127.0.0.1:8014"
+  artifacts_bucket: "geoparquet-derived"
+  routes:
+    - prefix: "https://data.source.coop/"
+      bucket: "sourcecoop"
+    - prefix: "https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/"
+      bucket: "overturemaps-us-west-2"
+```
+
+Run pgvs3 with `--range-cache-chunk 1048576` (or persist that value with
+`pgvs3 origin --range-cache-chunk 1048576 set origin.yaml`) so large Parquet
+range reads are cached as aligned chunks. The durable artifacts bucket holds
+versioned collection indexes; the volatile cache namespaces hold range chunks.
 
 ## Admin and development services
 

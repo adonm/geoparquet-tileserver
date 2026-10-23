@@ -84,51 +84,62 @@ type collectionPage struct {
 }
 
 var collectionsTemplate = template.Must(template.New("collections").Parse(`<!doctype html>
-<html lang="en" data-bs-theme="light">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
-<style>code { word-break: break-word; } .table td { vertical-align: middle; }</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@knadh/oat@1.0.0/oat.min.css" crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/@knadh/oat@1.0.0/oat.min.js" crossorigin="anonymous" defer></script>
+<style>
+@layer utilities {
+  code { word-break: break-word; }
+  .site-nav { border-block-end: 1px solid var(--border); padding-block: var(--space-3); }
+  .site-main { padding-block-end: var(--space-8); }
+  .page-title { margin-block-start: 0; }
+  .card-title { margin-block: 0; }
+  .h-100 { height: 100%; }
+  .table td { vertical-align: middle; }
+}
+</style>
 </head>
-<body class="bg-body-tertiary">
-<nav class="navbar navbar-expand-lg bg-body border-bottom">
-  <div class="container">
-    <a class="navbar-brand fw-semibold" href="/">GeoParquet Tile Server</a>
-    <div class="d-flex flex-wrap gap-2 align-items-center">
-      <a class="btn btn-sm btn-outline-secondary" href="/docs">API docs</a>
-    </div>
+<body>
+<header class="site-nav">
+  <div class="container hstack justify-between">
+    <a class="unstyled" href="/"><strong>GeoParquet Tile Server</strong></a>
+    <nav class="hstack gap-2" aria-label="Primary">
+      <a class="button outline small" href="/docs">API docs</a>
+    </nav>
   </div>
-</nav>
-<main class="container py-4">
-  <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+</header>
+<main class="container site-main">
+  <div class="hstack justify-between mb-4">
     <div>
-      <h1 class="h3 mb-1">Browse catalog</h1>
-      <p class="text-secondary mb-0">Collections, virtual groups, tiles, STAC documents, and raw assets.</p>
+      <h1 class="page-title">Browse catalog</h1>
+      <p class="text-light">Collections, virtual groups, tiles, STAC documents, and raw assets.</p>
     </div>
-    <div class="btn-group btn-group-sm" role="group" aria-label="Catalog">
-      {{range .Catalogs}}<a class="btn {{if .Current}}btn-dark{{else}}btn-outline-dark{{end}}" href="{{.URL}}">{{.Name}}{{if .Title}} · {{.Title}}{{end}}</a>{{end}}
-    </div>
+    <menu class="buttons" aria-label="Catalog">
+      {{range .Catalogs}}<li><a class="button small{{if .Current}}{{else}} outline{{end}}" href="{{.URL}}"{{if .Current}} aria-current="page"{{end}}>{{.Name}}{{if .Title}} · {{.Title}}{{end}}</a></li>{{end}}
+    </menu>
   </div>
-  <div class="card shadow-sm">
-    <div class="card-header d-flex justify-content-between align-items-center">
-      <span class="fw-semibold">Collections &amp; groups</span>
-      <span class="badge text-bg-secondary">{{len .Collections}}</span>
-    </div>
-    <div class="table-responsive">
-      <table class="table table-hover align-middle mb-0">
-        <thead class="table-light"><tr><th>ID</th><th>Title</th><th>Kind</th><th>Bounds</th><th>Zooms</th><th>Links</th></tr></thead>
+  <article class="card">
+    <header class="hstack justify-between mb-4">
+      <h3 class="card-title">Collections &amp; groups</h3>
+      <span class="badge outline">{{len .Collections}}</span>
+    </header>
+    <div class="table">
+      <table>
+        <thead><tr><th>ID</th><th>Title</th><th>Kind</th><th>Bounds</th><th>Zooms</th><th>Links</th></tr></thead>
         <tbody>
         {{range .Collections}}
           <tr>
-            <td><a class="fw-semibold text-decoration-none" href="{{.PageURL}}"><code>{{.ID}}</code></a></td>
-            <td>{{.Title}}{{if .Description}}<div class="small text-secondary">{{.Description}}</div>{{end}}</td>
-            <td><span class="badge {{if eq .Kind "group"}}text-bg-warning{{else}}text-bg-info{{end}}">{{.Kind}}</span></td>
-            <td class="small text-secondary"><code>{{.Bounds}}</code></td>
-            <td class="small">{{.MinZoom}}–{{.MaxZoom}}</td>
+            <td><a href="{{.PageURL}}"><code>{{.ID}}</code></a></td>
+            <td><strong>{{.Title}}</strong>{{if .Description}}<br><small class="text-light">{{.Description}}</small>{{end}}</td>
+            <td><span class="badge" data-variant="{{if eq .Kind "group"}}warning{{else}}secondary{{end}}">{{.Kind}}</span></td>
+            <td><small class="text-light"><code>{{.Bounds}}</code></small></td>
+            <td><small>{{.MinZoom}}–{{.MaxZoom}}</small></td>
             <td>
-              <div class="d-flex flex-wrap gap-2 small">
+              <div class="hstack gap-2">
                 <a href="{{.PageURL}}">Browse</a>
                 <a href="{{.TileJSONURL}}">TileJSON</a>
                 {{if .ItemsURL}}<a href="{{.ItemsURL}}">Items / assets</a>{{end}}
@@ -142,128 +153,161 @@ var collectionsTemplate = template.Must(template.New("collections").Parse(`<!doc
         </tbody>
       </table>
     </div>
-  </div>
-  <p class="small text-secondary mt-3 mb-0">Tile URL template: <code>/collections/{collection}/tiles/{z}/{x}/{y}.mvt</code></p>
+  </article>
+  <p class="text-light mt-4"><small>Tile URL template: <code>/collections/{collection}/tiles/{z}/{x}/{y}.mvt</code></small></p>
 </main>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
 </body>
 </html>
 `))
 
 var collectionTemplate = template.Must(template.New("collection").Parse(`<!doctype html>
-<html lang="en" data-bs-theme="light">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
-<style>code { word-break: break-word; }</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@knadh/oat@1.0.0/oat.min.css" crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/@knadh/oat@1.0.0/oat.min.js" crossorigin="anonymous" defer></script>
+<style>
+@layer utilities {
+  code { word-break: break-word; }
+  .site-nav { border-block-end: 1px solid var(--border); padding-block: var(--space-3); }
+  .site-main { padding-block-end: var(--space-8); }
+  .page-title { margin-block-start: 0; }
+  .card-title { margin-block: 0; }
+  .h-100 { height: 100%; }
+  .table td { vertical-align: middle; }
+}
+</style>
 </head>
-<body class="bg-body-tertiary">
-<nav class="navbar navbar-expand-lg bg-body border-bottom">
-  <div class="container">
-    <a class="navbar-brand fw-semibold" href="/">GeoParquet Tile Server</a>
-    <div class="d-flex flex-wrap gap-2">
-      <a class="btn btn-sm btn-outline-secondary" href="/collections.html{{.CatalogURL}}">Collections</a>
-      <a class="btn btn-sm btn-outline-secondary" href="/docs">API docs</a>
-    </div>
+<body>
+<header class="site-nav">
+  <div class="container hstack justify-between">
+    <a class="unstyled" href="/"><strong>GeoParquet Tile Server</strong></a>
+    <nav class="hstack gap-2" aria-label="Primary">
+      <a class="button outline small" href="/collections.html{{.CatalogURL}}">Collections</a>
+      <a class="button outline small" href="/docs">API docs</a>
+    </nav>
   </div>
-</nav>
-<main class="container py-4">
-  <nav aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="/">Directory</a></li><li class="breadcrumb-item active" aria-current="page">{{.Collection.ID}}</li></ol></nav>
-  <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+</header>
+<main class="container site-main">
+  <nav aria-label="Breadcrumb">
+    <ol class="unstyled hstack" style="font-size: var(--text-7)">
+      <li><a class="unstyled" href="/">Directory</a></li>
+      <li aria-hidden="true">/</li>
+      <li><span aria-current="page"><strong>{{.Collection.ID}}</strong></span></li>
+    </ol>
+  </nav>
+  <div class="hstack justify-between mb-4">
     <div>
-      <h1 class="h3 mb-1">{{.Collection.Title}} <span class="badge {{if eq .Collection.Kind "group"}}text-bg-warning{{else}}text-bg-info{{end}}">{{.Collection.Kind}}</span></h1>
-      <div class="text-secondary"><code>{{.Collection.ID}}</code>{{if .Collection.Description}} · {{.Collection.Description}}{{end}}</div>
+      <h1 class="page-title">{{.Collection.Title}} <span class="badge" data-variant="{{if eq .Collection.Kind "group"}}warning{{else}}secondary{{end}}">{{.Collection.Kind}}</span></h1>
+      <p class="text-light"><code>{{.Collection.ID}}</code>{{if .Collection.Description}} · {{.Collection.Description}}{{end}}</p>
     </div>
-    <div class="d-flex flex-wrap gap-2">
-      <a class="btn btn-sm btn-outline-primary" href="{{.Collection.TileJSONURL}}">TileJSON</a>
-      {{if .Collection.PMTilesURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.PMTilesURL}}">PMTiles passthrough</a>{{end}}
-      {{if .Collection.ItemsURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.ItemsURL}}">Items / raw assets</a>{{end}}
-      {{if .Collection.STACURL}}<a class="btn btn-sm btn-outline-primary" href="{{.Collection.STACURL}}">Raw STAC</a>{{end}}
-      {{if .Collection.RustGISParquetURL}}<a class="btn btn-sm btn-success" href="{{.Collection.RustGISParquetURL}}" target="_blank" rel="noopener">Open Parquet in RustGIS ↗</a>{{end}}
-      {{if .Collection.RustGISURL}}<a class="btn btn-sm btn-primary" href="{{.Collection.RustGISURL}}" target="_blank" rel="noopener">Open tiles in RustGIS ↗</a>{{end}}
+    <div class="hstack gap-2">
+      <a class="button outline small" href="{{.Collection.TileJSONURL}}">TileJSON</a>
+      {{if .Collection.PMTilesURL}}<a class="button outline small" href="{{.Collection.PMTilesURL}}">PMTiles passthrough</a>{{end}}
+      {{if .Collection.ItemsURL}}<a class="button outline small" href="{{.Collection.ItemsURL}}">Items / raw assets</a>{{end}}
+      {{if .Collection.STACURL}}<a class="button outline small" href="{{.Collection.STACURL}}">Raw STAC</a>{{end}}
+      {{if .Collection.RustGISParquetURL}}<a class="button outline small" href="{{.Collection.RustGISParquetURL}}" target="_blank" rel="noopener">Open Parquet in RustGIS ↗</a>{{end}}
+      {{if .Collection.RustGISURL}}<a class="button small" href="{{.Collection.RustGISURL}}" target="_blank" rel="noopener">Open tiles in RustGIS ↗</a>{{end}}
     </div>
   </div>
-  <div class="row g-3">
-    <div class="col-lg-7">
-      <div class="card shadow-sm h-100">
-        <div class="card-body">
-          <h2 class="h6 text-uppercase text-secondary">Tile URL</h2>
-          <code>{{.Collection.TileURL}}</code>
-          <hr>
-          <dl class="row mb-0 small">
-            <dt class="col-sm-3">Bounds</dt><dd class="col-sm-9"><code>{{.Collection.Bounds}}</code></dd>
-            <dt class="col-sm-3">Zooms</dt><dd class="col-sm-9">{{.Collection.MinZoom}}–{{.Collection.MaxZoom}}</dd>
-          </dl>
+  <div class="row">
+    <div class="col-7">
+      <article class="card h-100">
+        <h3 class="card-title">Tile URL</h3>
+        <p class="mt-2"><code>{{.Collection.TileURL}}</code></p>
+        <div class="vstack gap-2">
+          <div class="hstack justify-between"><small class="text-light">Bounds</small><code>{{.Collection.Bounds}}</code></div>
+          <div class="hstack justify-between"><small class="text-light">Zooms</small><span>{{.Collection.MinZoom}}–{{.Collection.MaxZoom}}</span></div>
         </div>
-      </div>
+      </article>
     </div>
-    <div class="col-lg-5">
-      <div class="card shadow-sm h-100">
-        <div class="card-body">
-          <h2 class="h6 text-uppercase text-secondary">STAC / passthrough</h2>
-          <p class="small text-secondary">Raw documents and assets are streamed by this server. Remote assets support HTTP range requests.</p>
-          <div class="d-grid gap-2">
-            {{if .Collection.STACURL}}<a class="btn btn-sm btn-outline-secondary text-start" href="{{.Collection.STACURL}}">Raw STAC document</a>{{end}}
-            {{if .Collection.ItemsURL}}<a class="btn btn-sm btn-outline-secondary text-start" href="{{.Collection.ItemsURL}}">Item and asset directory</a>{{end}}
-          </div>
+    <div class="col-5">
+      <article class="card h-100">
+        <h3 class="card-title">STAC / passthrough</h3>
+        <p class="text-light mt-2"><small>Raw documents and assets are streamed by this server. Remote assets support HTTP range requests.</small></p>
+        <div class="vstack gap-2">
+          {{if .Collection.STACURL}}<a class="button outline small w-100" href="{{.Collection.STACURL}}">Raw STAC document</a>{{end}}
+          {{if .Collection.ItemsURL}}<a class="button outline small w-100" href="{{.Collection.ItemsURL}}">Item and asset directory</a>{{end}}
         </div>
-      </div>
+      </article>
     </div>
   </div>
   {{if .Collection.Assets}}
-  <h2 class="h5 mt-4">Collection assets</h2>
-  <div class="card shadow-sm"><div class="table-responsive"><table class="table table-sm mb-0">
-    <thead class="table-light"><tr><th>Name</th><th>Type</th><th>Passthrough</th><th>RustGIS</th></tr></thead>
-    <tbody>{{range .Collection.Assets}}<tr><td><code>{{.Name}}</code></td><td class="text-secondary">{{.Type}}</td><td><a href="{{.URL}}">open</a></td><td>{{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">open data ↗</a>{{else}}<span class="text-secondary">—</span>{{end}}</td></tr>{{end}}</tbody>
-  </table></div></div>
+  <h2>Collection assets</h2>
+  <article class="card">
+    <div class="table">
+      <table>
+        <thead><tr><th>Name</th><th>Type</th><th>Passthrough</th><th>RustGIS</th></tr></thead>
+        <tbody>{{range .Collection.Assets}}<tr>
+          <td><code>{{.Name}}</code></td>
+          <td><small class="text-light">{{.Type}}</small></td>
+          <td><a href="{{.URL}}">open</a></td>
+          <td>{{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">open data ↗</a>{{else}}<small class="text-light">—</small>{{end}}</td>
+        </tr>{{end}}</tbody>
+      </table>
+    </div>
+  </article>
   {{end}}
   {{if .Collection.Children}}
-  <h2 class="h5 mt-4">Sub-collections</h2>
-  <div class="list-group shadow-sm">
-    {{range .Collection.Children}}<a class="list-group-item list-group-item-action d-flex justify-content-between align-items-center" href="{{.URL}}"><span>{{.Title}} <span class="text-secondary"><code>{{.Name}}</code></span></span><span>→</span></a>{{end}}
-  </div>
+  <h2>Sub-collections</h2>
+  <article class="card">
+    <div class="vstack gap-2">
+      {{range .Collection.Children}}<a class="hstack justify-between" href="{{.URL}}"><span><strong>{{.Title}}</strong> <small class="text-light"><code>{{.Name}}</code></small></span><span aria-hidden="true">→</span></a>{{end}}
+    </div>
+  </article>
   {{end}}
 </main>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
 </body>
 </html>
 `))
 
 var itemsTemplate = template.Must(template.New("items").Parse(`<!doctype html>
-<html lang="en" data-bs-theme="light">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{.Title}}</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
-<style>code { word-break: break-word; }</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@knadh/oat@1.0.0/oat.min.css" crossorigin="anonymous">
+<script src="https://cdn.jsdelivr.net/npm/@knadh/oat@1.0.0/oat.min.js" crossorigin="anonymous" defer></script>
+<style>
+@layer utilities {
+  code { word-break: break-word; }
+  .site-nav { border-block-end: 1px solid var(--border); padding-block: var(--space-3); }
+  .site-main { padding-block-end: var(--space-8); }
+  .page-title { margin-block-start: 0; }
+  .table td { vertical-align: middle; }
+}
+</style>
 </head>
-<body class="bg-body-tertiary">
-<nav class="navbar navbar-expand-lg bg-body border-bottom">
-  <div class="container">
-    <a class="navbar-brand fw-semibold" href="/">GeoParquet Tile Server</a>
-    <div class="d-flex gap-2">
-      <a class="btn btn-sm btn-outline-secondary" href="/collections/{{.Collection}}.html{{.Catalog}}">Collection</a>
-      <a class="btn btn-sm btn-outline-secondary" href="/docs">API docs</a>
-    </div>
+<body>
+<header class="site-nav">
+  <div class="container hstack justify-between">
+    <a class="unstyled" href="/"><strong>GeoParquet Tile Server</strong></a>
+    <nav class="hstack gap-2" aria-label="Primary">
+      <a class="button outline small" href="/collections/{{.Collection}}.html{{.Catalog}}">Collection</a>
+      <a class="button outline small" href="/docs">API docs</a>
+    </nav>
   </div>
-</nav>
-<main class="container py-4">
-  <h1 class="h3 mb-3">{{.Title}}</h1>
-  <div class="card shadow-sm"><div class="table-responsive"><table class="table table-hover align-middle mb-0">
-    <thead class="table-light"><tr><th>Item</th><th>BBox</th><th>STAC</th><th>Raw assets</th><th>RustGIS</th></tr></thead>
-    <tbody>{{range .Items}}<tr>
-      <td><code>{{.ID}}</code></td>
-      <td class="small text-secondary"><code>{{.BBox}}</code></td>
-      <td><a href="{{.STAC}}">STAC</a></td>
-      <td class="small">{{range .Assets}}<a class="me-2" href="{{.URL}}">{{.Name}}</a>{{end}}</td>
-      <td class="small">{{range .Assets}}{{if .RustGISURL}}<a class="me-2" href="{{.RustGISURL}}" target="_blank" rel="noopener">{{.Name}} ↗</a>{{end}}{{end}}</td>
-    </tr>{{end}}</tbody>
-  </table></div></div>
+</header>
+<main class="container site-main">
+  <h1 class="page-title">{{.Title}}</h1>
+  <article class="card">
+    <div class="table">
+      <table>
+        <thead><tr><th>Item</th><th>BBox</th><th>STAC</th><th>Raw assets</th><th>RustGIS</th></tr></thead>
+        <tbody>{{range .Items}}<tr>
+          <td><code>{{.ID}}</code></td>
+          <td><small class="text-light"><code>{{.BBox}}</code></small></td>
+          <td><a href="{{.STAC}}">STAC</a></td>
+          <td><div class="hstack gap-2">{{range .Assets}}<a href="{{.URL}}">{{.Name}}</a>{{end}}</div></td>
+          <td><div class="hstack gap-2">{{range .Assets}}{{if .RustGISURL}}<a href="{{.RustGISURL}}" target="_blank" rel="noopener">{{.Name}} ↗</a>{{end}}{{end}}</div></td>
+        </tr>{{end}}</tbody>
+      </table>
+    </div>
+  </article>
 </main>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
 </body>
 </html>
 `))

@@ -13,6 +13,7 @@ import (
 	"github.com/paulmach/orb/encoding/wkb"
 	"github.com/paulmach/orb/geojson"
 	"github.com/paulmach/orb/maptile"
+	"github.com/paulmach/orb/simplify"
 
 	"github.com/adonm/geoparquet-tileserver/internal/catalog"
 	filt "github.com/adonm/geoparquet-tileserver/internal/filter"
@@ -25,6 +26,9 @@ type Options struct {
 	MinZoom        int
 	MaxZoom        int
 	Preload        bool
+	ExcludeProps   []string
+	IDColumn       string
+	Simplify       float64
 }
 
 type Layer struct {
@@ -35,9 +39,19 @@ type Layer struct {
 
 	geomCol    string
 	partitions []*partitionRef
+	exclude    map[string]bool
+	idColumn   string
+	simplify   float64
+
+	fieldsOnce sync.Once
+	fields     []Field
+
+	indexMu     sync.RWMutex
+	indexBounds map[int]map[int][]rgBound
 }
 
 type partitionRef struct {
+	index   int
 	asset   string
 	geomCol string
 	bound   orb.Bound
@@ -54,13 +68,22 @@ func (p *partitionRef) get() (*Dataset, error) {
 }
 
 func New(opts Options, items []catalog.Item) (*Layer, error) {
-	l := &Layer{Name: opts.Name, MinZoom: opts.MinZoom, MaxZoom: opts.MaxZoom, geomCol: opts.GeometryColumn}
+	l := &Layer{
+		Name: opts.Name, MinZoom: opts.MinZoom, MaxZoom: opts.MaxZoom,
+		geomCol: opts.GeometryColumn, idColumn: opts.IDColumn, simplify: opts.Simplify,
+	}
+	if len(opts.ExcludeProps) > 0 {
+		l.exclude = make(map[string]bool, len(opts.ExcludeProps))
+		for _, name := range opts.ExcludeProps {
+			l.exclude[name] = true
+		}
+	}
 	for _, it := range items {
 		asset, ok := it.ParquetAsset()
 		if !ok {
 			continue
 		}
-		pr := &partitionRef{asset: asset, geomCol: opts.GeometryColumn, bound: it.Bound()}
+		pr := &partitionRef{index: len(l.partitions), asset: asset, geomCol: opts.GeometryColumn, bound: it.Bound()}
 		l.partitions = append(l.partitions, pr)
 		if opts.Preload {
 			ds, err := pr.get()
@@ -90,6 +113,20 @@ type RenderStats struct {
 }
 
 func (s RenderStats) QueryMS() float64 { return s.OpenMS + s.BoundsMS + s.ScanMS }
+
+func (l *Layer) boundsFor(p *partitionRef, ds *Dataset, level int) ([]rgBound, error) {
+	l.indexMu.RLock()
+	levels, ok := l.indexBounds[p.index]
+	var b []rgBound
+	if ok {
+		b, ok = levels[level]
+	}
+	l.indexMu.RUnlock()
+	if ok {
+		return b, nil
+	}
+	return ds.BoundsForLevel(level)
+}
 
 func (l *Layer) Render(ctx context.Context, z uint8, x, y uint32, minCount *int, f *filt.Filter) ([]byte, error) {
 	b, _, err := l.RenderDetailed(ctx, z, x, y, minCount, f)
@@ -121,6 +158,11 @@ func (l *Layer) RenderDetailed(ctx context.Context, z uint8, x, y uint32, minCou
 			}
 			if !ok {
 				return nil
+			}
+		}
+		if len(l.exclude) > 0 {
+			for name := range l.exclude {
+				delete(props, name)
 			}
 		}
 		g, err := wkb.Unmarshal(geom)
@@ -159,7 +201,7 @@ func (l *Layer) RenderDetailed(ctx context.Context, z uint8, x, y uint32, minCou
 			level = ds.LevelForZoom(int(z))
 		}
 		t0 = time.Now()
-		bounds, err := ds.BoundsForLevel(level)
+		bounds, err := l.boundsFor(p, ds, level)
 		stats.BoundsMS += time.Since(t0).Seconds() * 1000
 		if err != nil {
 			return nil, stats, err
@@ -191,6 +233,9 @@ func (l *Layer) RenderDetailed(ctx context.Context, z uint8, x, y uint32, minCou
 	t0 := time.Now()
 	ls := mvt.NewLayers(map[string]*geojson.FeatureCollection{l.Name: fc})
 	ls.ProjectToTile(tile)
+	if l.simplify > 0 {
+		ls.Simplify(simplify.DouglasPeucker(l.simplify))
+	}
 	ls.Clip(mvt.MapboxGLDefaultExtentBound)
 	b, err := mvt.Marshal(ls)
 	stats.EncodeMS = time.Since(t0).Seconds() * 1000
