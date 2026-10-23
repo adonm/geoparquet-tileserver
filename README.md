@@ -42,6 +42,7 @@ It is deliberately narrower than a general tile platform such as Tegola:
 - LRU tile cache plus request coalescing
 - named catalogs selectable with `?catalog=<name>`
 - TileJSON, collections, health, OpenAPI docs
+- optional OpenTunnel public HTTPS with no inbound 80/443 listener
 
 ## Default source: Overture
 
@@ -303,8 +304,10 @@ docker run -d --name geoparquet-tileserver \
   ko.local/geoparquet-tileserver:latest --config /config.yaml --listen :8080
 ```
 
-The image is a small static/distroless image. Put a TLS reverse proxy such as
-Caddy in front of the container for HTTPS.
+The image is a small static/distroless image. See [DEPLOYMENT.md](DEPLOYMENT.md)
+for the security-first host layout: the container listens on loopback, public
+HTTPS is provided by [OpenTunnel](https://opentunnel.xyz), and Caddy is internal
+only.
 
 ## Performance notes
 
