@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/danielgtaylor/huma/v2 v2.37.0
 	github.com/exergy-dev/go-cql2 v0.0.0-20260625203801-b83740de7228
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.4.0
 	github.com/parquet-go/parquet-go v0.32.0
 	github.com/paulmach/orb v0.13.0
 	golang.org/x/sync v0.19.0
